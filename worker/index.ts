@@ -5866,7 +5866,10 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
           String(before.id), current, { ...next, revision: Number(before.revision) + 1, change_id: changeId, updated_at: now },
           { changeId }),
       ]);
-      if (!results[0].meta.changes || !results[1].meta.changes) {
+      if (!results[0].meta.changes) {
+        return json({ error: "View changed since it was loaded", code: "edit_conflict" }, 409);
+      }
+      if (!results[1].meta.changes) {
         return json({ error: "Custom-object view update failed and was rolled back", code: "view_update_failed" }, 500);
       }
     } catch {
