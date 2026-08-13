@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, and hosted-path Sites milestones to `main` on 2026-08-13; current main is `336de08` through PR #13. Consent-aware Marketing email is implemented and locally browser-proven on `agent/marketing-orientation`, but is not part of the proven `main` baseline until its PR passes clean Linux gates and merges.
+Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, hosted-path Sites, and consent-aware Marketing email milestones to `main` on 2026-08-13; current main is `9a360d3` through PR #14.
 
 Visible and functional:
 
@@ -45,12 +45,13 @@ Visible and functional:
 - Local-first Booking with governed publication, public availability, replay-safe booking, and private reschedule/cancel tokens
 - Truthful first-party Reporting with bounded cohorts, permission-aware pipeline snapshots, and currency-separated values
 - Admin-only provider-neutral Payments register with immutable manual payment/refund/dispute/reversal events and currency-separated balances
+- Consent-aware plain-text Marketing campaigns with immutable recipient snapshots, verified Resend delivery, current-consent suppression, replay-safe retry/cancel evidence, and one-click unsubscribe
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
 Explicitly omitted from navigation on `main`:
 
 - Calendar-provider sync; payment processors, banking, invoices, payouts, settlements, FX conversion, and reconciliation
-- Marketing email on `main` (implemented only on the active branch until merge); social publishing everywhere
+- Social publishing
 - Reputation management
 - Full attribution, ads, and call reporting
 - Voice carrier and unrestricted chat agents
@@ -96,7 +97,7 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Active branch: `agent/marketing-orientation`. The consent-aware Resend email implementation now exists and is locally browser-proven. Remaining milestone work is to commit the final audit repairs, pass remote clean-Linux `verify`/CodeQL/GitGuardian, merge the PR, and update this baseline to the merge commit. Social marketing remains a separate omitted surface.
+Active branch: `agent/marketing-merge-memory`, a documentation-only post-merge truth update. Consent-aware Resend Marketing is proven on `main`; social marketing remains a separate omitted surface. The next product milestone must be independently oriented before implementation rather than inferred from HighLevel's navigation.
 
 Booking merged through PR #9, first-party Reporting through PR #10, and provider-neutral Payments through PR #11. Payments is now on `main` at merge commit `387054bc518a6b13a75ed15661e3f54528b95b9e`; it adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI.
 
@@ -134,12 +135,12 @@ Marketing implementation and local evidence on 2026-08-13: migration `0054`, Dri
 
 Marketing Edge acceptance on 2026-08-13: Edge selected a real `con_…` express-opted-in Contact while an opted-out Contact remained disabled, created and saved `Edge acceptance briefing`, froze immutable V1 with 1 selected/1 eligible/0 excluded, and truthfully disabled send because no verified local Resend connection existed. A valid purpose-bound fragment token opened `/unsubscribe`, produced `You’re unsubscribed`, erased the URL fragment, persisted consent revision 2 with manual suppression, changed the queued recipient to suppressed, and produced exactly one unsubscribe audit. The admin UI reloaded that evidence and completed two-step campaign cancellation. Admin and public pages had zero application-origin warning/error logs; each proved `innerWidth=bodyScrollWidth=documentScrollWidth=390` under per-tab mobile emulation. Extension-origin warnings were excluded from application evidence.
 
-Marketing automated evidence on 2026-08-13: build, TypeScript, Twenty provenance, all 39 rendered/security tests, the focused current-source lifecycle test, stress shard (1), and extended shard (36) pass. The lifecycle proves admin denial for members, a 200/409 freeze race with one immutable version, current consent filtering, post-freeze opt-out suppression, provider failure and retry without resending success, authenticated unsubscribe-link inclusion, replay-safe unsubscribe, and database immutability. ESLint and `git diff --check` pass; production npm audit reports zero vulnerabilities. A one-shot Windows `npm test` reached core-domain after passing build/type/provenance/rendered/stress/extended, then a pre-existing operations-health timing assertion transiently returned `opened: 0`; its exact unchanged rerun passed. A second Windows run and PR #14's first Linux run both stalled when the provider-mocking Marketing lifecycle shared the broad authorization process; the clean Linux log proved stress (1), extended (36), and core-domain (74) green before the authorization stall. The full gate now isolates Marketing (1), provider/product authorization (15), and generic transport contracts (6) into separate fail-fast processes while retaining all 22 tests; all three replacement shards pass locally in 6.74s, 12.82s, and 20.77s. A replacement Linux `verify` is the authoritative merge gate; do not represent this milestone as complete until it passes.
+Marketing automated evidence on 2026-08-13: build, TypeScript, Twenty provenance, all 39 rendered/security tests, the focused current-source lifecycle test, stress shard (1), and extended shard (36) pass. The lifecycle proves admin denial for members, a 200/409 freeze race with one immutable version, current consent filtering, post-freeze opt-out suppression, provider failure and retry without resending success, authenticated unsubscribe-link inclusion, replay-safe unsubscribe, and database immutability. ESLint and `git diff --check` pass; production npm audit reports zero vulnerabilities. A one-shot Windows `npm test` reached core-domain after passing build/type/provenance/rendered/stress/extended, then a pre-existing operations-health timing assertion transiently returned `opened: 0`; its exact unchanged rerun passed. A second Windows run and PR #14's first Linux run both stalled when the provider-mocking Marketing lifecycle shared the broad authorization process; the first Linux log proved stress (1), extended (36), and core-domain (74) green before the authorization stall. The full gate now isolates Marketing (1), provider/product authorization (15), and generic transport contracts (6) into separate fail-fast processes while retaining all 22 tests; all three replacement shards pass locally in 6.74s, 12.82s, and 20.77s. PR #14's replacement clean Linux `verify` passed in 4m18s; CodeQL analysis/result and GitGuardian passed. PR #14 merged at `9a360d3f0a670acab6cf5cc9a2400c8f33374a5e`.
 
 ## Next milestone sequence
 
-1. Commit and push the final Marketing audit repairs, open its PR, and require clean Linux `verify`, CodeQL, and GitGuardian before merge.
-2. Merge Marketing only after those remote gates prove the complete supported suite; then update the proven baseline and merge commit here.
+1. Orient the next smallest authoritative vertical slice from the remaining omitted surfaces; write its persistence, authority, failure, recovery, and proof contracts before implementation.
+2. Preserve the now-proven Marketing email lifecycle while adding only independently supported provider behavior.
 3. Keep social marketing, Reputation, ads/call attribution, voice carrier, custom domains, calendar sync, and payment-provider surfaces omitted until each receives an independent contract and proof cycle.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
