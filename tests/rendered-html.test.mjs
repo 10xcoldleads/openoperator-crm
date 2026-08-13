@@ -191,6 +191,30 @@ test("ships a bounded responsive immutable hosted-path Sites publisher", async (
   assert.match(migration, /site_versions_site_version_unique/);
 });
 
+test("ships a bounded consent-aware Resend marketing campaign surface", async () => {
+  const [dashboard, workspace, unsubscribe, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/MarketingWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/unsubscribe/UnsubscribeClient.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0054_marketing_campaigns.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "marketing", label: "Marketing"/);
+  assert.match(dashboard, /<MarketingWorkspace active=\{activeView === "marketing"\}/);
+  assert.match(workspace, /CONFIRM FREEZE RECIPIENTS/);
+  assert.match(workspace, /CONFIRM SEND CAMPAIGN/);
+  assert.match(workspace, /CONFIRM RETRY FAILED RECIPIENTS/);
+  assert.match(workspace, /Only current opted-in \+ express consent survives freezing/);
+  assert.match(workspace, /Provider acceptance is not delivery or an open/);
+  assert.match(workspace, /HTML, tracking, schedules, social publishing, and unlimited sends are absent/);
+  assert.match(unsubscribe, /history\.replaceState\(null, "", "\/unsubscribe"\)/);
+  assert.match(unsubscribe, /changes marketing email permission only/);
+  assert.match(styles, /@media\(max-width:560px\)\{\.marketing-workspace/);
+  assert.match(migration, /marketing_campaign_versions_immutable_update/);
+  assert.match(migration, /marketing_campaign_recipients_identity_immutable/);
+  assert.match(migration, /marketing_campaign_recipients_unsubscribe_hash_unique/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);
@@ -290,19 +314,25 @@ test("lets independently authenticated routes reach their own credential checks"
   assert.equal(source.status, 401);
   assert.equal(agent.status, 401);
   assert.equal(scheduler.status, 401);
-  const [surveyApi, siteApi, surveyPage, sitePage, robots] = await Promise.all([
+  const [surveyApi, siteApi, unsubscribeApi, surveyPage, sitePage, unsubscribePage, robots] = await Promise.all([
     worker.fetch(new Request("http://localhost/v1/public/surveys/example-survey"), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/v1/public/sites/example-site?path=/"), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/v1/public/marketing/unsubscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "invalid" }) }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/s/example-survey", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/site/example-site", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/unsubscribe", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/robots.txt"), productionLikeEnv, ctx),
   ]);
   assert.notEqual(surveyApi.status, 503);
   assert.notEqual(siteApi.status, 503);
+  assert.notEqual(unsubscribeApi.status, 503);
   assert.equal(surveyPage.status, 200);
   assert.match(surveyPage.headers.get("x-robots-tag"), /noindex/);
   assert.equal(sitePage.status, 200);
   assert.equal(sitePage.headers.get("x-robots-tag"), null);
+  assert.equal(unsubscribePage.status, 200);
+  assert.match(unsubscribePage.headers.get("x-robots-tag"), /noindex/);
+  assert.equal(unsubscribePage.headers.get("cache-control"), "private, no-store");
   assert.match(await robots.text(), /Allow: \/site\//);
 });
 

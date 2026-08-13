@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, and Surveys milestones to `main` on 2026-08-13; current main is `cdaf156` through PR #12. Sites is the active independently proven vertical slice on `agent/sites`.
+Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, and hosted-path Sites milestones to `main` on 2026-08-13; current main is `336de08` through PR #13. Consent-aware Marketing email is implemented and locally browser-proven on `agent/marketing-orientation`, but is not part of the proven `main` baseline until its PR passes clean Linux gates and merges.
 
 Visible and functional:
 
@@ -49,9 +49,8 @@ Visible and functional:
 
 Explicitly omitted from navigation on `main`:
 
-- Sites until the active branch completes its remote merge gates
 - Calendar-provider sync; payment processors, banking, invoices, payouts, settlements, FX conversion, and reconciliation
-- Marketing/social publishing
+- Marketing email on `main` (implemented only on the active branch until merge); social publishing everywhere
 - Reputation management
 - Full attribution, ads, and call reporting
 - Voice carrier and unrestricted chat agents
@@ -97,7 +96,7 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Active branch: `agent/sites`; implementation is complete locally and awaiting the final full gate, commit, pull request, and clean Linux merge evidence.
+Active branch: `agent/marketing-orientation`. The consent-aware Resend email implementation now exists and is locally browser-proven. Remaining milestone work is to commit the final audit repairs, pass remote clean-Linux `verify`/CodeQL/GitGuardian, merge the PR, and update this baseline to the merge commit. Social marketing remains a separate omitted surface.
 
 Booking merged through PR #9, first-party Reporting through PR #10, and provider-neutral Payments through PR #11. Payments is now on `main` at merge commit `387054bc518a6b13a75ed15661e3f54528b95b9e`; it adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI.
 
@@ -125,10 +124,23 @@ Sites local evidence on 2026-08-13: the complete `npm test` gate passed in 7m00s
 
 Sites Edge acceptance on 2026-08-13: an admin created `Sites acceptance proof`, built a two-page site, added a bounded features block, saved the draft, and completed the two-step publish control. The public V1 rendered the saved hero, text, features, navigation, and inactive-custom-domain disclosure. Navigating to `/evidence` applied title `Evidence` and meta description `How OpenOperator proves safe publication.` Editing the draft hero to `PRIVATE DRAFT CHANGE` left the public V1 headline unchanged, proving browser-visible publication freezing. At 390px the public page reported `innerWidth=bodyClientWidth=bodyScrollWidth=documentScrollWidth=390`; the admin Sites route also reported 390px containment under per-tab device emulation. Admin and public tabs produced zero application errors. The two-step revoke control changed the admin state to `revoked` and the public route to `Page unavailable / Published site not found`.
 
+Sites remote evidence: PR #13 clean Linux `verify` passed in 4m19s; CodeQL analysis and result passed; GitGuardian passed. It merged 2026-08-13 at `336de083909f387563e0b25a1900e77457affe6d`. Sites is now part of the proven `main` baseline, not pending work.
+
+Marketing orientation on active branch `agent/marketing-orientation`: the first honest slice will be **consent-aware Resend email campaigns**, not a generic social scheduler. It reuses the already encrypted, workspace-owned, verified Resend connection and the authoritative Contact/`communication_consents` records. A campaign is a workspace draft with bounded name, subject, plain-text body, and an explicit set of Contact IDs; publication freezes an immutable campaign version and a recipient snapshot. Only Contacts that still have an email and current `opted_in` + `express` email consent at launch may enter that snapshot. Unknown, contractual, inbound-request, opted-out, missing-email, duplicate-email, and suppressed recipients are excluded with persisted reason counts. Launch is admin-only, requires a two-step human confirmation, and is a one-time bounded operation—not an implied scheduler. Every recipient gets its own idempotency key, pending/succeeded/failed state, provider receipt or redacted error, and audit evidence. Consent is rechecked immediately before each provider call so a post-snapshot opt-out still suppresses delivery. Retries may target only failed, still-consented recipients and must never resend a succeeded recipient. Immediate campaign cancellation stops unsent work but cannot recall provider-accepted email.
+
+Marketing first-slice boundaries: no HTML editor, attachments, link tracking, open tracking, attribution claims, automated list growth, purchased/unknown-consent audiences, social networks, recurring schedules, timezone sends, A/B testing, custom sending domains, unsubscribe-hosting claims, or unlimited bulk throughput. Existing public Forms remain the source of explicit opt-in and existing Contact consent controls remain the suppression authority. The public one-click unsubscribe token is unguessable, hash-only at rest, purpose-bound to workspace/contact/email, replay-safe, and atomically writes `opted_out`/`manual_suppression` plus audit evidence without exposing CRM data. Provider webhooks and delivery-state synchronization remain a later adapter; initial `succeeded` means provider accepted, not delivered or opened.
+
+Marketing implementation and local evidence on 2026-08-13: migration `0054`, Drizzle models, recovery schema version 31, admin APIs, `MarketingWorkspace`, and public `/unsubscribe` implement the bounded lifecycle above. The final audit found and repaired a production-only Contact-ID mismatch: ordinary CRM Contacts are `con_…`, while the first test fixture incorrectly used `ct_…`; recovery, API validation, and acceptance now use the real identifier contract. Delivery now claims recipients in waves of three and each claim requires the campaign still be `sending`, so concurrent cancellation can stop later unstarted provider work. Public unsubscribe removes the fragment token from browser history, updates consent to `opted_out` + `manual_suppression`, suppresses an unaccepted recipient, and writes exactly one replay-safe audit event.
+
+Marketing Edge acceptance on 2026-08-13: Edge selected a real `con_…` express-opted-in Contact while an opted-out Contact remained disabled, created and saved `Edge acceptance briefing`, froze immutable V1 with 1 selected/1 eligible/0 excluded, and truthfully disabled send because no verified local Resend connection existed. A valid purpose-bound fragment token opened `/unsubscribe`, produced `You’re unsubscribed`, erased the URL fragment, persisted consent revision 2 with manual suppression, changed the queued recipient to suppressed, and produced exactly one unsubscribe audit. The admin UI reloaded that evidence and completed two-step campaign cancellation. Admin and public pages had zero application-origin warning/error logs; each proved `innerWidth=bodyScrollWidth=documentScrollWidth=390` under per-tab mobile emulation. Extension-origin warnings were excluded from application evidence.
+
+Marketing automated evidence on 2026-08-13: build, TypeScript, Twenty provenance, all 39 rendered/security tests, the focused current-source lifecycle test, stress shard (1), and extended shard (36) pass. The lifecycle proves admin denial for members, a 200/409 freeze race with one immutable version, current consent filtering, post-freeze opt-out suppression, provider failure and retry without resending success, authenticated unsubscribe-link inclusion, replay-safe unsubscribe, and database immutability. ESLint and `git diff --check` pass; production npm audit reports zero vulnerabilities. A one-shot Windows `npm test` reached core-domain after passing build/type/provenance/rendered/stress/extended, then a pre-existing operations-health timing assertion transiently returned `opened: 0`; its exact unchanged rerun passed. A second Windows run and PR #14's first Linux run both stalled when the provider-mocking Marketing lifecycle shared the broad authorization process; the clean Linux log proved stress (1), extended (36), and core-domain (74) green before the authorization stall. The full gate now isolates Marketing (1), provider/product authorization (15), and generic transport contracts (6) into separate fail-fast processes while retaining all 22 tests; all three replacement shards pass locally in 6.74s, 12.82s, and 20.77s. A replacement Linux `verify` is the authoritative merge gate; do not represent this milestone as complete until it passes.
+
 ## Next milestone sequence
 
-1. Finish Sites full local gate, PR checks, merge, and exact memory evidence.
-2. Orient the next omitted product surface from the truth matrix; do not expose it until a complete independently proven vertical slice exists.
+1. Commit and push the final Marketing audit repairs, open its PR, and require clean Linux `verify`, CodeQL, and GitGuardian before merge.
+2. Merge Marketing only after those remote gates prove the complete supported suite; then update the proven baseline and merge commit here.
+3. Keep social marketing, Reputation, ads/call attribution, voice carrier, custom domains, calendar sync, and payment-provider surfaces omitted until each receives an independent contract and proof cycle.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 

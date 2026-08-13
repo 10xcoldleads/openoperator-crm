@@ -95,6 +95,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM mailbox_connections"),
     env.DB.prepare("DELETE FROM conversation_messages"),
     env.DB.prepare("DELETE FROM conversation_threads"),
+    env.DB.prepare("DELETE FROM marketing_campaign_recipients"),
+    env.DB.prepare("DELETE FROM marketing_campaign_versions"),
+    env.DB.prepare("DELETE FROM marketing_campaigns"),
     env.DB.prepare("DELETE FROM communication_consents"),
     env.DB.prepare("DELETE FROM form_submissions"),
     env.DB.prepare("DELETE FROM form_versions"),
@@ -152,6 +155,7 @@ beforeEach(async () => {
 });
 
 describe("authorization and transport security", () => {
+  describe("[auth-domain] product and provider boundaries", () => {
   it("reports health without exposing CRM data", async () => {
     const response = await call("/v1/health");
     expect(response.status).toBe(200);
@@ -921,6 +925,88 @@ describe("authorization and transport security", () => {
     expect((await call(`/v1/public/sites/${created.slug}?path=/`)).status).toBe(404);
   });
 
+  it("[marketing] freezes consented recipients, suppresses opt-outs, retries failures idempotently, and supports one-click unsubscribe", async () => {
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_marketing_member','ws_openoperator','marketing-member@example.com','member',1,?)`).bind(now).run();
+    expect((await call("/v1/admin/marketing-campaigns", { method: "POST", headers: { "oai-authenticated-user-email": "marketing-member@example.com", ...jsonHeaders }, body: JSON.stringify({ name: "Denied" }) })).status).toBe(403);
+    const contacts = [
+      { id: `con_${"1".repeat(32)}`, email: "accepted@example.com", first: "Accepted", consent: "express" },
+      { id: `con_${"2".repeat(32)}`, email: "withdrawn@example.com", first: "Withdrawn", consent: "express" },
+      { id: `con_${"3".repeat(32)}`, email: "contractual@example.com", first: "Contractual", consent: "contractual" },
+    ];
+    for (const contact of contacts) {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,first_name,status,stage,score,tags,custom_fields,created_at,updated_at)
+          VALUES(?,?,?,?,'lead','new',0,'[]','{}',?,?)`).bind(contact.id, "ws_openoperator", contact.email, contact.first, now, now),
+        env.DB.prepare(`INSERT INTO communication_consents(id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+          VALUES(?,?,?,'email','opted_in',?,'Fixture consent',?,1,?,'fixture',?,?)`).bind(`consent_${contact.id.slice(-24)}`, "ws_openoperator", contact.id, contact.consent, now, `chg_${contact.id.slice(-24)}`, now, now),
+      ]);
+    }
+    const rawKey = "re_marketing_test_workspace_secret_123";
+    const connection = await call("/v1/admin/resend-connection", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      label: "Marketing sender", api_key: rawKey, from_email: "news@openoperator.ai", from_name: "OpenOperator",
+    }) }).then((response) => response.json()) as { connection: { revision: number } };
+    const providerBodies: Array<{ text: string }> = [];
+    const outboundFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const payload = JSON.parse(String(init?.body)) as { text: string }; providerBodies.push(payload);
+      return Response.json({ id: "provider_marketing_verify" }, { status: 200 });
+    });
+    expect((await call("/v1/admin/resend-connection/verify", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      expected_revision: connection.connection.revision, idempotency_key: "marketing-verify-1",
+    }) })).status).toBe(201);
+    providerBodies.length = 0;
+
+    const create = await call("/v1/admin/marketing-campaigns", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Operator briefing" }) });
+    expect(create.status).toBe(201);
+    const campaign = (await create.json() as { campaign: { id: string; revision: number } }).campaign;
+    const update = await call(`/v1/admin/marketing-campaigns/${campaign.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      name: "Operator briefing", subject: "A useful systems lesson", body_text: "Build, observe, test, repair, and prove.",
+      contact_ids: contacts.map((contact) => contact.id), if_revision: campaign.revision,
+    }) });
+    expect(update.status).toBe(200); const updated = (await update.json() as { campaign: { revision: number } }).campaign;
+    const freezeRace = await Promise.all([1, 2].map(() => call(`/v1/admin/marketing-campaigns/${campaign.id}/publish`, {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: updated.revision, confirmation: "FREEZE RECIPIENTS" }),
+    })));
+    expect(freezeRace.map((response) => response.status).sort()).toEqual([200, 409]);
+    const frozen = await call(`/v1/admin/marketing-campaigns/${campaign.id}`, { headers: adminHeaders }).then((response) => response.json()) as {
+      campaign: { revision: number; status: string }; versions: Array<{ exclusion_summary: Record<string, unknown> }>; recipients: Array<{ contact_id: string; status: string }>;
+    };
+    expect(frozen.campaign.status).toBe("ready"); expect(frozen.recipients).toHaveLength(2);
+    expect(frozen.versions[0].exclusion_summary).toMatchObject({ selected: 3, eligible: 2, excluded: 1, reasons: { not_express_opted_in: 1 } });
+    expect(JSON.stringify(frozen)).not.toMatch(/munsub_|unsubscribe_token/i);
+    await env.DB.prepare(`UPDATE communication_consents SET status='opted_out',basis='manual_suppression',revision=revision+1 WHERE contact_id=?`).bind(contacts[1].id).run();
+    outboundFetch.mockImplementation(async (_input, init) => { providerBodies.push(JSON.parse(String(init?.body)) as { text: string });
+      return Response.json({ name: "temporary_error", message: "Try again" }, { status: 503 }); });
+    const launched = await call(`/v1/admin/marketing-campaigns/${campaign.id}/launch`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      if_revision: frozen.campaign.revision, confirmation: "SEND CAMPAIGN",
+    }) });
+    expect(launched.status).toBe(200); const launchedCampaign = (await launched.json() as { campaign: { revision: number; status: string } }).campaign;
+    expect(launchedCampaign.status).toBe("completed"); expect(outboundFetch).toHaveBeenCalledTimes(2);
+    expect((await env.DB.prepare("SELECT status FROM marketing_campaign_recipients WHERE contact_id=?").bind(contacts[1].id).first())?.status).toBe("suppressed");
+    const failed = await env.DB.prepare("SELECT id,status,attempt_count FROM marketing_campaign_recipients WHERE contact_id=?").bind(contacts[0].id).first<Record<string, unknown>>();
+    expect(failed).toMatchObject({ status: "failed", attempt_count: 1 });
+    outboundFetch.mockImplementation(async (_input, init) => { providerBodies.push(JSON.parse(String(init?.body)) as { text: string });
+      return Response.json({ id: "provider_marketing_accepted" }, { status: 200 }); });
+    const retried = await call(`/v1/admin/marketing-campaigns/${campaign.id}/retry`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      if_revision: launchedCampaign.revision, confirmation: "RETRY FAILED RECIPIENTS",
+    }) });
+    expect(retried.status).toBe(200); expect((await retried.json() as { campaign: { status: string } }).campaign.status).toBe("completed");
+    expect((await env.DB.prepare("SELECT status,attempt_count,provider_email_id FROM marketing_campaign_recipients WHERE id=?").bind(failed?.id).first())!)
+      .toMatchObject({ status: "succeeded", attempt_count: 2, provider_email_id: "provider_marketing_accepted" });
+    expect(outboundFetch).toHaveBeenCalledTimes(3);
+    const token = providerBodies.at(-1)?.text.match(/#(munsub_mrec_[a-f0-9]{32}_[a-f0-9]{64})/)?.[1];
+    expect(token).toBeTruthy();
+    const unsubscribe = () => call("/v1/public/marketing/unsubscribe", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ token }) });
+    expect((await unsubscribe()).status).toBe(200); expect((await unsubscribe()).status).toBe(200);
+    expect(await env.DB.prepare("SELECT status,basis,revision FROM communication_consents WHERE contact_id=?").bind(contacts[0].id).first())
+      .toEqual({ status: "opted_out", basis: "manual_suppression", revision: 2 });
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='marketing.unsubscribed' AND entity_id=?").bind(contacts[0].id).first<{ total: number }>())?.total).toBe(1);
+    await expect(env.DB.prepare("UPDATE marketing_campaign_versions SET subject='tampered' WHERE campaign_id=?").bind(campaign.id).run()).rejects.toThrow(/immutable/);
+    await expect(env.DB.prepare("UPDATE marketing_campaign_recipients SET email='tampered@example.com' WHERE id=?").bind(failed?.id).run()).rejects.toThrow(/immutable/);
+    outboundFetch.mockRestore();
+  });
+
   it("keeps a provider-neutral payment ledger immutable, replay-safe, currency-safe, and adjustment-bounded", async () => {
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
@@ -1231,6 +1317,9 @@ describe("authorization and transport security", () => {
     expect(stored?.sections).toContain("layout_first");
   });
 
+  });
+
+  describe("[auth-contract] generic transport boundaries", () => {
   it("rejects every private API family before parsing attacker-controlled bodies", async () => {
     const privateRequests: Array<[string, RequestInit | undefined]> = [
       ["/v1/admin/workspaces", undefined],
@@ -1399,6 +1488,7 @@ describe("authorization and transport security", () => {
       ["/v1/admin/payments/ledger", "GET, POST"],
       ["/v1/admin/surveys", "GET, POST"],
       ["/v1/admin/sites", "GET, POST"],
+      ["/v1/admin/marketing-campaigns", "GET, POST"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}`, "GET, PATCH"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}/publish`, "POST"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}/revoke`, "POST"],
@@ -1406,6 +1496,11 @@ describe("authorization and transport security", () => {
       [`/v1/admin/sites/site_${"a".repeat(32)}`, "GET, PATCH"],
       [`/v1/admin/sites/site_${"a".repeat(32)}/publish`, "POST"],
       [`/v1/admin/sites/site_${"a".repeat(32)}/revoke`, "POST"],
+      [`/v1/admin/marketing-campaigns/mkt_${"a".repeat(32)}`, "GET, PATCH"],
+      [`/v1/admin/marketing-campaigns/mkt_${"a".repeat(32)}/publish`, "POST"],
+      [`/v1/admin/marketing-campaigns/mkt_${"a".repeat(32)}/launch`, "POST"],
+      [`/v1/admin/marketing-campaigns/mkt_${"a".repeat(32)}/retry`, "POST"],
+      [`/v1/admin/marketing-campaigns/mkt_${"a".repeat(32)}/cancel`, "POST"],
       [`/v1/admin/payments/ledger/pay_${"a".repeat(32)}/adjustments`, "POST"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],
@@ -1544,6 +1639,7 @@ describe("authorization and transport security", () => {
       method, headers: { ...adminHeaders, ...jsonHeaders }, body: "{",
     })));
     expect(malformed.map((response) => response.status)).toEqual(Array(bodyRoutes.length).fill(400));
+  });
   });
 });
 

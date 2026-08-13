@@ -20,6 +20,7 @@ interface FrameworkEnv extends Env {
   WEBHOOK_ENCRYPTION_KEY?: string;
   RECOVERY_ENCRYPTION_KEY?: string;
   RECOVERY_PREVIOUS_ENCRYPTION_KEYS?: string;
+  UNSUBSCRIBE_SIGNING_KEY?: string;
   SCHEDULER_SECRET?: string;
   COMPOSIO_API_KEY?: string;
   COMPOSIO_GMAIL_AUTH_CONFIG_ID?: string;
@@ -90,6 +91,7 @@ function usesIndependentCredential(pathname: string): boolean {
     /^\/s\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
     /^\/v1\/public\/sites\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
     /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(pathname) ||
+    pathname === "/v1/public/marketing/unsubscribe" || pathname === "/unsubscribe" ||
     /^\/v1\/public\/booking\/[a-z0-9][a-z0-9-]{2,79}(?:\/appointments)?$/.test(pathname) ||
     pathname === "/v1/public/appointments/manage" ||
     /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(pathname) ||
@@ -229,7 +231,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 30;
+const RECOVERY_SCHEMA_VERSION = 31;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -242,6 +244,7 @@ type RecoveryTable =
   | "forms" | "form_versions" | "form_submissions"
   | "surveys" | "survey_versions" | "survey_responses"
   | "sites" | "site_versions"
+  | "marketing_campaigns" | "marketing_campaign_versions" | "marketing_campaign_recipients"
   | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
   | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
@@ -284,6 +287,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   survey_responses: { columns: ["id", "workspace_id", "survey_id", "survey_version_id", "idempotency_key", "answers", "privacy_accepted", "started_at", "submitted_at", "duration_seconds", "ip_hash", "user_agent"] },
   sites: { columns: ["id", "workspace_id", "name", "slug", "status", "pages", "theme", "custom_domain", "domain_status", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   site_versions: { columns: ["id", "workspace_id", "site_id", "version", "pages", "theme", "published_by", "published_at"] },
+  marketing_campaigns: { columns: ["id", "workspace_id", "name", "status", "subject", "body_text", "contact_ids", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  marketing_campaign_versions: { columns: ["id", "workspace_id", "campaign_id", "version", "subject", "body_text", "selected_contact_ids", "exclusion_summary", "published_by", "published_at"] },
+  marketing_campaign_recipients: { columns: ["id", "workspace_id", "campaign_id", "campaign_version_id", "contact_id", "email", "first_name", "last_name", "consent_revision", "unsubscribe_token_hash", "status", "attempt_count", "provider_email_id", "response_status", "error", "sent_at", "updated_at"] },
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
@@ -2000,6 +2006,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/forms": ["GET", "POST"],
     "/v1/admin/surveys": ["GET", "POST"],
     "/v1/admin/sites": ["GET", "POST"],
+    "/v1/admin/marketing-campaigns": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
     "/v1/admin/reports/revenue-funnel": ["GET"],
     "/v1/admin/payments/ledger": ["GET", "POST"],
@@ -2012,6 +2019,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}\/responses$/, ["GET"]],
     [/^\/v1\/admin\/sites\/site_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/sites\/site_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
+    [/^\/v1\/admin\/marketing-campaigns\/mkt_[a-f0-9]{32}$/, ["GET", "PATCH"]],
+    [/^\/v1\/admin\/marketing-campaigns\/mkt_[a-f0-9]{32}\/(publish|launch|retry|cancel)$/, ["POST"]],
     [/^\/v1\/admin\/custom-fields\/cfld_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/views$/, ["GET", "POST"]],
@@ -2457,6 +2466,15 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
   }
   for (const row of tables.site_versions) requireReference("site_versions", row, "site_id", "sites");
   for (const row of tables.sites) requireReference("sites", row, "published_version_id", "site_versions", true);
+  for (const row of tables.marketing_campaign_versions) requireReference("marketing_campaign_versions", row, "campaign_id", "marketing_campaigns");
+  for (const row of tables.marketing_campaigns) requireReference("marketing_campaigns", row, "published_version_id", "marketing_campaign_versions", true);
+  for (const row of tables.marketing_campaign_recipients) {
+    requireReference("marketing_campaign_recipients", row, "campaign_id", "marketing_campaigns");
+    requireReference("marketing_campaign_recipients", row, "campaign_version_id", "marketing_campaign_versions");
+    requireReference("marketing_campaign_recipients", row, "contact_id", "contacts");
+    const version = tables.marketing_campaign_versions.find((candidate) => candidate.id === row.campaign_version_id);
+    if (version?.campaign_id !== row.campaign_id) throw new ApiError(400, "Marketing recipient version belongs to another campaign");
+  }
   for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
   for (const row of tables.booking_appointments) {
     requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
@@ -2583,6 +2601,35 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     siteVersionNumbers.add(identity);
     try { validateSitePages(JSON.parse(String(row.pages))); validateSiteTheme(JSON.parse(String(row.theme))); }
     catch { throw new ApiError(400, "Backup contains invalid site version content"); }
+  }
+  const campaignVersionNumbers = new Set<string>(); const unsubscribeHashes = new Set<string>();
+  for (const row of tables.marketing_campaigns) {
+    let contactIds: unknown;
+    try { contactIds = JSON.parse(String(row.contact_ids)); } catch { throw new ApiError(400, "Backup contains invalid marketing contacts"); }
+    if (!Array.isArray(contactIds) || contactIds.length > 25 || new Set(contactIds).size !== contactIds.length ||
+      contactIds.some((value) => typeof value !== "string" || !/^con_[a-f0-9]{32}$/.test(value)) ||
+      !["draft", "ready", "sending", "completed", "cancelled"].includes(String(row.status)) ||
+      typeof row.name !== "string" || !row.name.trim() || String(row.name).length > 120 ||
+      typeof row.subject !== "string" || !row.subject.trim() || String(row.subject).length > 200 ||
+      typeof row.body_text !== "string" || !row.body_text.trim() || String(row.body_text).length > 10_000 ||
+      !Number.isInteger(row.revision) || Number(row.revision) < 1) throw new ApiError(400, "Backup contains an invalid marketing campaign");
+  }
+  for (const row of tables.marketing_campaign_versions) {
+    const identity = `${row.campaign_id}:${row.version}`; let selected: unknown; let excluded: unknown;
+    try { selected = JSON.parse(String(row.selected_contact_ids)); excluded = JSON.parse(String(row.exclusion_summary)); }
+    catch { throw new ApiError(400, "Backup contains invalid marketing version evidence"); }
+    if (campaignVersionNumbers.has(identity) || !Number.isInteger(row.version) || Number(row.version) < 1 ||
+      !Array.isArray(selected) || selected.length > 25 || !isPlainObject(excluded)) throw new ApiError(400, "Backup contains an invalid marketing version");
+    campaignVersionNumbers.add(identity);
+  }
+  for (const row of tables.marketing_campaign_recipients) {
+    if (unsubscribeHashes.has(String(row.unsubscribe_token_hash)) || !/^[a-f0-9]{64}$/.test(String(row.unsubscribe_token_hash)) ||
+      !validEmail(normalizeEmail(row.email)) || !Number.isInteger(row.consent_revision) || Number(row.consent_revision) < 1 ||
+      !["queued", "sending", "succeeded", "failed", "suppressed", "cancelled"].includes(String(row.status)) ||
+      !Number.isInteger(row.attempt_count) || Number(row.attempt_count) < 0 || Number(row.attempt_count) > 10) {
+      throw new ApiError(400, "Backup contains an invalid marketing recipient");
+    }
+    unsubscribeHashes.add(String(row.unsubscribe_token_hash));
   }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
@@ -5284,6 +5331,67 @@ function safeSite(row: Record<string, unknown>) {
     custom_domain: row.custom_domain, domain_status: row.domain_status, published_version_id: row.published_version_id, revision: row.revision,
     created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at, public_path: row.status === "published" ? `/site/${row.slug}` : null };
 }
+function safeMarketingCampaign(row: Record<string, unknown>) {
+  return { id: row.id, name: row.name, status: row.status, subject: row.subject, body_text: row.body_text,
+    contact_ids: JSON.parse(String(row.contact_ids)), published_version_id: row.published_version_id, revision: row.revision,
+    created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at };
+}
+function unsubscribeSecret(env: FrameworkEnv) {
+  if (!env.UNSUBSCRIBE_SIGNING_KEY || env.UNSUBSCRIBE_SIGNING_KEY.length < 32) throw new ApiError(503, "Unsubscribe signing is not configured");
+  return env.UNSUBSCRIBE_SIGNING_KEY;
+}
+async function marketingUnsubscribeToken(env: FrameworkEnv, recipient: Record<string, unknown>) {
+  const payload = `${recipient.id}.${recipient.workspace_id}.${recipient.contact_id}.${normalizeEmail(String(recipient.email))}.${recipient.consent_revision}`;
+  const signature = await webhookSignature(unsubscribeSecret(env), "marketing-unsubscribe:v1", payload);
+  return `munsub_${recipient.id}_${signature}`;
+}
+async function deliverMarketingRecipient(env: FrameworkEnv, access: WorkspaceAccess, request: Request,
+  connection: Record<string, unknown>, campaign: Record<string, unknown>, recipientId: string, retry: boolean) {
+  const recipient = await env.DB.prepare(`SELECT r.*,v.subject,v.body_text FROM marketing_campaign_recipients r
+    JOIN marketing_campaign_versions v ON v.id=r.campaign_version_id AND v.workspace_id=r.workspace_id
+    WHERE r.workspace_id=? AND r.campaign_id=? AND r.id=?`).bind(access.workspaceId, campaign.id, recipientId).first<Record<string, unknown>>();
+  if (!recipient || recipient.status !== (retry ? "failed" : "queued")) return;
+  const claimed = await env.DB.prepare(`UPDATE marketing_campaign_recipients SET status='sending',attempt_count=attempt_count+1,error=NULL,updated_at=?
+    WHERE id=? AND workspace_id=? AND status=? AND EXISTS(SELECT 1 FROM marketing_campaigns campaign
+      WHERE campaign.id=marketing_campaign_recipients.campaign_id AND campaign.workspace_id=marketing_campaign_recipients.workspace_id AND campaign.status='sending')
+    AND EXISTS(SELECT 1 FROM communication_consents cc
+      WHERE cc.workspace_id=marketing_campaign_recipients.workspace_id AND cc.contact_id=marketing_campaign_recipients.contact_id
+        AND cc.channel='email' AND cc.status='opted_in' AND cc.basis='express')`)
+    .bind(new Date().toISOString(), recipient.id, access.workspaceId, retry ? "failed" : "queued").run();
+  if (!claimed.meta.changes) {
+    await env.DB.prepare(`UPDATE marketing_campaign_recipients SET status='suppressed',error='Express email consent is no longer active',updated_at=?
+      WHERE id=? AND workspace_id=? AND status=?`).bind(new Date().toISOString(), recipient.id, access.workspaceId, retry ? "failed" : "queued").run();
+    return;
+  }
+  const consent = await env.DB.prepare(`SELECT status,basis FROM communication_consents WHERE workspace_id=? AND contact_id=? AND channel='email'`)
+    .bind(access.workspaceId, recipient.contact_id).first<{ status: string; basis: string }>();
+  if (!consent || consent.status !== "opted_in" || consent.basis !== "express") {
+    await env.DB.prepare("UPDATE marketing_campaign_recipients SET status='suppressed',error='Express email consent was withdrawn before send',updated_at=? WHERE id=? AND workspace_id=? AND status='sending'")
+      .bind(new Date().toISOString(), recipient.id, access.workspaceId).run();
+    return;
+  }
+  const token = await marketingUnsubscribeToken(env, recipient);
+  if (await sha256(token) !== recipient.unsubscribe_token_hash) throw new ApiError(500, "Recipient unsubscribe evidence is inconsistent");
+  const unsubscribeUrl = `${new URL(request.url).origin}/unsubscribe#${token}`;
+  const text = `${recipient.body_text}\n\nUnsubscribe from marketing email: ${unsubscribeUrl}`;
+  const idempotencyKey = `marketing:${recipient.campaign_version_id}:${recipient.id}`;
+  let provider: Awaited<ReturnType<typeof resendProviderSend>>;
+  try { provider = await resendProviderSend(env, connection, access.workspaceId, String(recipient.email), String(recipient.subject), text, idempotencyKey); }
+  catch { provider = { ok: false, status: 502, error: "Resend could not be reached" }; }
+  const now = new Date().toISOString(); const action = provider.ok ? "marketing.recipient_accepted" : "marketing.recipient_failed";
+  const after = provider.ok ? { status: "succeeded", provider_email_id: provider.providerEmailId, response_status: provider.status }
+    : { status: "failed", response_status: provider.status, error: provider.error };
+  await env.DB.batch([
+    provider.ok
+      ? env.DB.prepare(`UPDATE marketing_campaign_recipients SET status='succeeded',provider_email_id=?,response_status=?,error=NULL,sent_at=?,updated_at=? WHERE id=? AND workspace_id=? AND status='sending'`)
+        .bind(provider.providerEmailId, provider.status, now, now, recipient.id, access.workspaceId)
+      : env.DB.prepare(`UPDATE marketing_campaign_recipients SET status='failed',response_status=?,error=?,updated_at=? WHERE id=? AND workspace_id=? AND status='sending'`)
+        .bind(provider.status, provider.error, now, recipient.id, access.workspaceId),
+    env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+      SELECT ?,?,'user',?,?,?,?,NULL,?,?,? WHERE changes()>0`)
+      .bind(id("audit"), access.workspaceId, access.email, action, "marketing_campaign_recipient", recipient.id, JSON.stringify(after), requestId(request), now),
+  ]);
+}
 function validateSurveyQuestions(value: unknown): SurveyQuestion[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 30) throw new ApiError(400, "questions must contain 1 to 30 supported questions");
   const seen = new Set<string>();
@@ -5485,6 +5593,36 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
   if (url.pathname === "/v1/health") {
     if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
     return json({ ok: true, service: "openoperator-crm", version: 1 });
+  }
+
+  if (url.pathname === "/v1/public/marketing/unsubscribe") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
+    if (Object.keys(body).some((key) => key !== "token")) return json({ error: "Unsubscribe request contains unsupported fields" }, 400);
+    const token = optionalString(body.token, "token", 180) || "";
+    if (!/^munsub_mrec_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token)) return json({ error: "Unsubscribe link is invalid" }, 400);
+    const tokenHash = await sha256(token);
+    const recipient = await env.DB.prepare(`SELECT r.*,c.status campaign_status FROM marketing_campaign_recipients r
+      JOIN marketing_campaigns c ON c.id=r.campaign_id AND c.workspace_id=r.workspace_id WHERE r.unsubscribe_token_hash=?`)
+      .bind(tokenHash).first<Record<string, unknown>>();
+    if (!recipient) return json({ error: "Unsubscribe link is invalid" }, 404);
+    let expected: string; try { expected = await marketingUnsubscribeToken(env, recipient); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Unsubscribe is unavailable" }, 503); }
+    if (expected !== token) return json({ error: "Unsubscribe link is invalid" }, 400);
+    const now = new Date().toISOString(); const changeId = id("chg"); const consentId = id("consent");
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO communication_consents(id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,'email','opted_out','manual_suppression','One-click marketing unsubscribe',?,1,?,'public-unsubscribe',?,?)
+        ON CONFLICT(workspace_id,contact_id,channel) DO UPDATE SET status='opted_out',basis='manual_suppression',evidence=excluded.evidence,
+          captured_at=excluded.captured_at,revision=communication_consents.revision+1,change_id=excluded.change_id,created_by=excluded.created_by,updated_at=excluded.updated_at
+          WHERE communication_consents.status<>'opted_out'`)
+        .bind(consentId, recipient.workspace_id, recipient.contact_id, now, changeId, now, now),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'public','unsubscribe','marketing.unsubscribed','contact',?,NULL,?,?,? WHERE changes()>0`)
+        .bind(id("audit"), recipient.workspace_id, recipient.contact_id, JSON.stringify({ channel: "email", status: "opted_out", basis: "manual_suppression", recipient_id: recipient.id }), requestId(request), now),
+      env.DB.prepare(`UPDATE marketing_campaign_recipients SET status='suppressed',error='Unsubscribed before provider acceptance',updated_at=?
+        WHERE workspace_id=? AND contact_id=? AND status IN ('queued','failed')`).bind(now, recipient.workspace_id, recipient.contact_id),
+    ]);
+    return json({ ok: true, status: "unsubscribed", message: "You will no longer receive marketing email from this workspace." });
   }
 
   const publicFormMatch = url.pathname.match(/^\/v1\/public\/forms\/([a-z0-9][a-z0-9-]{2,79})$/);
@@ -6653,6 +6791,162 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     });
     const responses = evidence.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => key !== "questions")));
     return json({ responses, version_summaries: versionSummaries, truncated: rows.results.length > 100 });
+  }
+
+  if (url.pathname === "/v1/admin/marketing-campaigns" && request.method === "GET") {
+    const rows = await env.DB.prepare(`SELECT c.*,
+      (SELECT COUNT(*) FROM marketing_campaign_versions v WHERE v.workspace_id=c.workspace_id AND v.campaign_id=c.id) version_count,
+      (SELECT COUNT(*) FROM marketing_campaign_recipients r WHERE r.workspace_id=c.workspace_id AND r.campaign_id=c.id) recipient_count,
+      (SELECT COUNT(*) FROM marketing_campaign_recipients r WHERE r.workspace_id=c.workspace_id AND r.campaign_id=c.id AND r.status='succeeded') accepted_count,
+      (SELECT COUNT(*) FROM marketing_campaign_recipients r WHERE r.workspace_id=c.workspace_id AND r.campaign_id=c.id AND r.status='failed') failed_count
+      FROM marketing_campaigns c WHERE c.workspace_id=? ORDER BY c.updated_at DESC,c.id`).bind(workspaceId).all<Record<string, unknown>>();
+    return json({ campaigns: rows.results.map((row) => ({ ...safeMarketingCampaign(row), version_count: row.version_count,
+      recipient_count: row.recipient_count, accepted_count: row.accepted_count, failed_count: row.failed_count })),
+      runtime: { resend_required: true, unsubscribe_signing_configured: Boolean(env.UNSUBSCRIBE_SIGNING_KEY && env.UNSUBSCRIBE_SIGNING_KEY.length >= 32), max_selected_contacts: 25 } });
+  }
+  if (url.pathname === "/v1/admin/marketing-campaigns" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => key !== "name")) return json({ error: "Campaign request contains unsupported fields" }, 400);
+    const name = optionalString(body.name, "name", 120) || ""; if (!name) return json({ error: "name is required" }, 400);
+    const campaignId = id("mkt"); const now = new Date().toISOString(); const changeId = id("chg");
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO marketing_campaigns(id,workspace_id,name,status,subject,body_text,contact_ids,published_version_id,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,'draft',?,'Write a useful plain-text message.','[]',NULL,1,?,?,?,?)`).bind(campaignId, workspaceId, name, name, changeId, access.email, now, now),
+      await auditStatement(env, access, request, "marketing.campaign_created", "marketing_campaign", campaignId, null, { name }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, campaignId).first<Record<string, unknown>>();
+    return json({ campaign: safeMarketingCampaign(created!) }, 201);
+  }
+  const marketingMatch = url.pathname.match(/^\/v1\/admin\/marketing-campaigns\/(mkt_[a-f0-9]{32})$/);
+  if (marketingMatch && request.method === "GET") {
+    const campaign = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, marketingMatch[1]).first<Record<string, unknown>>();
+    if (!campaign) return json({ error: "Campaign not found" }, 404);
+    const versions = await env.DB.prepare("SELECT id,version,exclusion_summary,published_by,published_at FROM marketing_campaign_versions WHERE workspace_id=? AND campaign_id=? ORDER BY version DESC")
+      .bind(workspaceId, campaign.id).all<Record<string, unknown>>();
+    const recipients = await env.DB.prepare(`SELECT id,contact_id,email,first_name,last_name,status,attempt_count,provider_email_id,response_status,error,sent_at,updated_at
+      FROM marketing_campaign_recipients WHERE workspace_id=? AND campaign_id=? ORDER BY email,id LIMIT 100`).bind(workspaceId, campaign.id).all();
+    const contacts = await env.DB.prepare(`SELECT c.id,c.email,c.first_name,c.last_name,cc.status consent_status,cc.basis consent_basis,cc.revision consent_revision
+      FROM contacts c LEFT JOIN communication_consents cc ON cc.workspace_id=c.workspace_id AND cc.contact_id=c.id AND cc.channel='email'
+      WHERE c.workspace_id=? ORDER BY LOWER(c.email),c.id LIMIT 200`).bind(workspaceId).all();
+    const connection = await env.DB.prepare("SELECT id,label,from_email,status FROM resend_connections WHERE workspace_id=? AND status='active'").bind(workspaceId).first();
+    return json({ campaign: safeMarketingCampaign(campaign), versions: versions.results.map((version) => ({ ...version, exclusion_summary: JSON.parse(String(version.exclusion_summary)) })),
+      recipients: recipients.results, contacts: contacts.results, connection: connection || null,
+      runtime: { unsubscribe_signing_configured: Boolean(env.UNSUBSCRIBE_SIGNING_KEY && env.UNSUBSCRIBE_SIGNING_KEY.length >= 32), max_selected_contacts: 25 } });
+  }
+  if (marketingMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name", "subject", "body_text", "contact_ids", "if_revision"].includes(key))) return json({ error: "Campaign update contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, marketingMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Campaign not found" }, 404);
+    if (before.status !== "draft") return json({ error: "Only a draft campaign can be edited" }, 409);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Campaign changed since it was loaded", code: "edit_conflict" }, 409);
+    const name = optionalString(body.name, "name", 120) || ""; const subject = optionalString(body.subject, "subject", 200) || "";
+    const bodyText = optionalString(body.body_text, "body_text", 10_000) || "";
+    if (!name || !subject || !bodyText) return json({ error: "name, subject, and body_text are required" }, 400);
+    if (!Array.isArray(body.contact_ids) || body.contact_ids.length > 25 || new Set(body.contact_ids).size !== body.contact_ids.length ||
+      body.contact_ids.some((value) => typeof value !== "string" || !/^con_[a-f0-9]{32}$/.test(value))) return json({ error: "contact_ids must contain up to 25 unique Contact IDs" }, 400);
+    const now = new Date().toISOString(); const changeId = id("chg");
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE marketing_campaigns SET name=?,subject=?,body_text=?,contact_ids=?,revision=revision+1,change_id=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND revision=? AND status='draft'`).bind(name, subject, bodyText, JSON.stringify(body.contact_ids), changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,'marketing.campaign_updated','marketing_campaign',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM marketing_campaigns WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeMarketingCampaign(before)), JSON.stringify({ name, subject, body_text: bodyText, contact_ids: body.contact_ids }), requestId(request), now, workspaceId, before.id, changeId),
+    ]);
+    if (results.some((result) => !result.meta.changes)) return json({ error: "Campaign changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ campaign: safeMarketingCampaign(updated!) });
+  }
+  const marketingLifecycleMatch = url.pathname.match(/^\/v1\/admin\/marketing-campaigns\/(mkt_[a-f0-9]{32})\/(publish|launch|retry|cancel)$/);
+  if (marketingLifecycleMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["if_revision", "confirmation"].includes(key))) return json({ error: "Campaign lifecycle request contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, marketingLifecycleMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Campaign not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Campaign changed since it was loaded", code: "edit_conflict" }, 409);
+    const action = marketingLifecycleMatch[2]; const confirmations: Record<string, string> = { publish: "FREEZE RECIPIENTS", launch: "SEND CAMPAIGN", retry: "RETRY FAILED RECIPIENTS", cancel: "CANCEL CAMPAIGN" };
+    if (body.confirmation !== confirmations[action]) return json({ error: "Explicit campaign confirmation is required" }, 400);
+    const now = new Date().toISOString(); const changeId = id("chg");
+    if (action === "publish") {
+      if (before.status !== "draft") return json({ error: "Only a draft campaign can freeze recipients" }, 409);
+      unsubscribeSecret(env); const selected = JSON.parse(String(before.contact_ids)) as string[];
+      if (!selected.length) return json({ error: "Select at least one Contact" }, 400);
+      const rows = await env.DB.prepare(`SELECT c.id,c.email,c.first_name,c.last_name,cc.status consent_status,cc.basis consent_basis,cc.revision consent_revision
+        FROM contacts c JOIN json_each(?) selected ON selected.value=c.id
+        LEFT JOIN communication_consents cc ON cc.workspace_id=c.workspace_id AND cc.contact_id=c.id AND cc.channel='email'
+        WHERE c.workspace_id=?`).bind(JSON.stringify(selected), workspaceId).all<Record<string, unknown>>();
+      const reasons = { missing_contact: selected.length - rows.results.length, invalid_email: 0, not_express_opted_in: 0, duplicate_email: 0 };
+      const eligible: Record<string, unknown>[] = []; const emails = new Set<string>();
+      for (const row of rows.results) { const email = normalizeEmail(String(row.email));
+        if (!validEmail(email)) { reasons.invalid_email++; continue; }
+        if (row.consent_status !== "opted_in" || row.consent_basis !== "express" || !Number.isInteger(row.consent_revision)) { reasons.not_express_opted_in++; continue; }
+        if (emails.has(email)) { reasons.duplicate_email++; continue; } emails.add(email); eligible.push({ ...row, email }); }
+      if (!eligible.length) return json({ error: "No selected Contact currently has express email marketing consent" }, 409);
+      const next = await env.DB.prepare("SELECT COALESCE(MAX(version),0)+1 version FROM marketing_campaign_versions WHERE workspace_id=? AND campaign_id=?").bind(workspaceId, before.id).first<{ version: number }>();
+      const versionId = id("mktver"); const recipients = await Promise.all(eligible.map(async (contact) => { const recipientId = id("mrec");
+        const material = { id: recipientId, workspace_id: workspaceId, contact_id: contact.id, email: contact.email, consent_revision: contact.consent_revision };
+        return { ...material, first_name: contact.first_name, last_name: contact.last_name, token_hash: await sha256(await marketingUnsubscribeToken(env, material)) }; }));
+      const exclusionSummary = { selected: selected.length, eligible: recipients.length, excluded: selected.length - recipients.length, reasons };
+      try { const results = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO marketing_campaign_versions(id,workspace_id,campaign_id,version,subject,body_text,selected_contact_ids,exclusion_summary,published_by,published_at)
+          SELECT ?,workspace_id,id,?,?,?,?,?,?,? FROM marketing_campaigns WHERE workspace_id=? AND id=? AND revision=? AND status='draft'`)
+          .bind(versionId, Number(next?.version || 1), before.subject, before.body_text, before.contact_ids, JSON.stringify(exclusionSummary), access.email, now, workspaceId, before.id, before.revision),
+        ...recipients.map((recipient) => env.DB.prepare(`INSERT INTO marketing_campaign_recipients(id,workspace_id,campaign_id,campaign_version_id,contact_id,email,first_name,last_name,consent_revision,unsubscribe_token_hash,status,attempt_count,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,'queued',0,?)`).bind(recipient.id, workspaceId, before.id, versionId, recipient.contact_id, recipient.email, recipient.first_name || null, recipient.last_name || null, recipient.consent_revision, recipient.token_hash, now)),
+        env.DB.prepare("UPDATE marketing_campaigns SET status='ready',published_version_id=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=? AND status='draft'")
+          .bind(versionId, changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'marketing.recipients_frozen','marketing_campaign',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM marketing_campaigns WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeMarketingCampaign(before)), JSON.stringify({ version_id: versionId, version: next?.version, exclusion_summary: exclusionSummary }), requestId(request), now, workspaceId, before.id, changeId),
+      ]); if (results.some((result) => !result.meta.changes)) throw new Error("conflict"); }
+      catch { return json({ error: "Campaign changed before recipients could be frozen", code: "edit_conflict" }, 409); }
+    } else if (action === "cancel") {
+      if (!["ready", "sending"].includes(String(before.status))) return json({ error: "Only a ready or sending campaign can be cancelled" }, 409);
+      const results = await env.DB.batch([
+        env.DB.prepare("UPDATE marketing_campaigns SET status='cancelled',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=? AND status IN ('ready','sending')")
+          .bind(changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'marketing.campaign_cancelled','marketing_campaign',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM marketing_campaigns WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeMarketingCampaign(before)), JSON.stringify({ status: "cancelled" }), requestId(request), now, workspaceId, before.id, changeId),
+        env.DB.prepare("UPDATE marketing_campaign_recipients SET status='cancelled',error='Campaign cancelled before send',updated_at=? WHERE workspace_id=? AND campaign_id=? AND status IN ('queued','failed')").bind(now, workspaceId, before.id),
+      ]); if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: "Campaign changed before it could be cancelled", code: "edit_conflict" }, 409);
+    } else {
+      const retry = action === "retry";
+      if (retry ? before.status !== "completed" : before.status !== "ready") return json({ error: retry ? "Only a completed campaign can retry failed recipients" : "Only a ready campaign can launch" }, 409);
+      const connection = await env.DB.prepare("SELECT * FROM resend_connections WHERE workspace_id=? AND status='active'").bind(workspaceId).first<Record<string, unknown>>();
+      if (!connection) return json({ error: "An active verified Resend connection is required" }, 409);
+      unsubscribeSecret(env);
+      const recipients = await env.DB.prepare(`SELECT id FROM marketing_campaign_recipients WHERE workspace_id=? AND campaign_id=? AND status=? ORDER BY id LIMIT 26`)
+        .bind(workspaceId, before.id, retry ? "failed" : "queued").all<{ id: string }>();
+      if (!recipients.results.length) return json({ error: retry ? "No failed recipients remain eligible for retry" : "No queued recipients remain" }, 409);
+      if (recipients.results.length > 25) return json({ error: "Campaign exceeds the bounded recipient limit" }, 409);
+      const claimed = await env.DB.batch([
+        env.DB.prepare("UPDATE marketing_campaigns SET status='sending',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=? AND status=?")
+          .bind(changeId, now, workspaceId, before.id, before.revision, retry ? "completed" : "ready"),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,?, 'marketing_campaign',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM marketing_campaigns WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, retry ? "marketing.retry_started" : "marketing.launch_started", before.id, JSON.stringify(safeMarketingCampaign(before)), JSON.stringify({ recipient_count: recipients.results.length }), requestId(request), now, workspaceId, before.id, changeId),
+      ]);
+      if (!claimed[0].meta.changes || !claimed[1].meta.changes) return json({ error: "Campaign changed before sending began", code: "edit_conflict" }, 409);
+      // Claim in small bounded waves. A concurrent cancellation can change the campaign
+      // state between waves, preventing recipients that have not started from reaching
+      // the provider while still keeping the request duration bounded for 25 recipients.
+      for (let offset = 0; offset < recipients.results.length; offset += 3) {
+        await Promise.all(recipients.results.slice(offset, offset + 3)
+          .map((recipient) => deliverMarketingRecipient(env, access, request, connection, before, recipient.id, retry)));
+      }
+      const finishedAt = new Date().toISOString(); const finishChangeId = id("chg");
+      await env.DB.batch([
+        env.DB.prepare("UPDATE marketing_campaigns SET status='completed',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND status='sending'")
+          .bind(finishChangeId, finishedAt, workspaceId, before.id),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'marketing.launch_finished','marketing_campaign',?,NULL,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM marketing_campaigns WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify({ attempted: recipients.results.length }), requestId(request), finishedAt, workspaceId, before.id, finishChangeId),
+      ]);
+    }
+    const updated = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    const counts = await env.DB.prepare(`SELECT status,COUNT(*) count FROM marketing_campaign_recipients WHERE workspace_id=? AND campaign_id=? GROUP BY status`).bind(workspaceId, before.id).all();
+    return json({ campaign: safeMarketingCampaign(updated!), recipient_counts: counts.results });
   }
 
   if (url.pathname === "/v1/admin/sites" && request.method === "GET") {
@@ -8430,6 +8724,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM conversation_messages WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM marketing_campaign_recipients WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM marketing_campaign_versions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM marketing_campaigns WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM survey_responses WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM site_versions WHERE workspace_id=?").bind(workspaceId),
@@ -13958,12 +14255,12 @@ const worker = {
         if (independentlyAuthenticated) return independentlyAuthenticated;
         if ((/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) || /^\/s\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) ||
           /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(url.pathname) ||
-          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname)) && request.method === "GET") {
+          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname) || url.pathname === "/unsubscribe") && request.method === "GET") {
           const response = await handler.fetch(request, env, ctx);
           const headers = new Headers(response.headers);
           for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
           if (url.pathname.startsWith("/site/")) headers.delete("x-robots-tag");
-          headers.set("cache-control", "public, max-age=60, stale-while-revalidate=300");
+          headers.set("cache-control", url.pathname === "/unsubscribe" ? "private, no-store" : "public, max-age=60, stale-while-revalidate=300");
           return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
         }
       }

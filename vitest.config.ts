@@ -12,6 +12,7 @@ export default defineConfig({
           ADMIN_EMAILS: "owner@example.com",
           WEBHOOK_ENCRYPTION_KEY: "test-only-webhook-encryption-key",
           RECOVERY_ENCRYPTION_KEY: "test-only-recovery-encryption-key-with-32-characters",
+          UNSUBSCRIBE_SIGNING_KEY: "test-only-unsubscribe-signing-key-with-32-characters",
           SCHEDULER_SECRET: "test-only-scheduler-secret-with-32-characters",
           ALLOW_INSECURE_LOCAL_AUTH: "true",
           COMPOSIO_API_KEY: "test-only-composio-api-key",
