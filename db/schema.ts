@@ -655,6 +655,19 @@ export const agentWorkspaceRateWindows = sqliteTable("agent_workspace_rate_windo
   requestCount: integer("request_count").notNull().default(0),
 });
 
+export const sites = sqliteTable("sites", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(), slug: text("slug").notNull(), status: text("status").notNull().default("draft"), pages: text("pages").notNull(), theme: text("theme").notNull(),
+  customDomain: text("custom_domain"), domainStatus: text("domain_status").notNull().default("disabled"), publishedVersionId: text("published_version_id"),
+  revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("sites_slug_unique").on(table.slug), index("sites_workspace_updated_idx").on(table.workspaceId, table.updatedAt, table.id)]);
+
+export const siteVersions = sqliteTable("site_versions", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  siteId: text("site_id").notNull().references(() => sites.id, { onDelete: "cascade" }), version: integer("version").notNull(), pages: text("pages").notNull(), theme: text("theme").notNull(),
+  publishedBy: text("published_by").notNull(), publishedAt: text("published_at").notNull(),
+}, (table) => [uniqueIndex("site_versions_site_version_unique").on(table.workspaceId, table.siteId, table.version)]);
+
 export const agentWorkItems = sqliteTable("agent_work_items", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id),

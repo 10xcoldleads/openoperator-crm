@@ -100,6 +100,8 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM form_versions"),
     env.DB.prepare("DELETE FROM forms"),
     env.DB.prepare("DELETE FROM survey_responses"),
+    env.DB.prepare("DELETE FROM site_versions"),
+    env.DB.prepare("DELETE FROM sites"),
     env.DB.prepare("DELETE FROM survey_versions"),
     env.DB.prepare("DELETE FROM surveys"),
     env.DB.prepare("DELETE FROM booking_appointments"),
@@ -879,6 +881,46 @@ describe("authorization and transport security", () => {
     expect((await call(`/v1/public/surveys/${created.slug}`)).status).toBe(404);
   });
 
+  it("publishes immutable bounded sites while keeping custom domains and arbitrary code disabled", async () => {
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_site_member','ws_openoperator','site-member@example.com','member',1,?)`).bind(now).run();
+    const memberHeaders = { "oai-authenticated-user-email": "site-member@example.com", ...jsonHeaders };
+    expect((await call("/v1/admin/sites", { method: "POST", headers: memberHeaders, body: JSON.stringify({ name: "Denied" }) })).status).toBe(403);
+    const createdResponse = await call("/v1/admin/sites", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Operator field guide" }) });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json() as { site: { id: string; slug: string; revision: number; custom_domain: null; domain_status: string } }).site;
+    expect(created).toMatchObject({ custom_domain: null, domain_status: "disabled" });
+    expect((await call(`/v1/public/sites/${created.slug}?path=/`)).status).toBe(404);
+    expect((await call(`/v1/admin/sites/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Unsafe", pages: [], theme: {}, custom_domain: "example.com", if_revision: created.revision }) })).status).toBe(400);
+    const pages = [
+      { id: "home", path: "/", title: "Operator field guide", description: "A bounded published site", components: [
+        { id: "hero_main", type: "hero", eyebrow: "FIELD GUIDE", heading: "Automate the whole thing", body: "Coordinate tools around an outcome.", cta_label: "Read the method", cta_href: "/method" },
+        { id: "feature_grid", type: "features", heading: "The operating stack", items: [{ title: "Plan", body: "Define proof." }, { title: "Build", body: "Connect systems." }] },
+      ] },
+      { id: "method", path: "/method", title: "The method", description: "How the system works", components: [
+        { id: "method_text", type: "text", heading: "Never assume", body: "Build, observe, test, repair, and prove." },
+        { id: "method_cta", type: "cta", heading: "Start small", body: "Choose a measurable workflow.", cta_label: "Return home", cta_href: "/" },
+      ] },
+    ];
+    const theme = { background: "#f5f2e9", surface: "#ffffff", text: "#172d36", accent: "#087f8c", font: "serif" };
+    const updatedResponse = await call(`/v1/admin/sites/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Operator field guide", pages, theme, if_revision: created.revision }) });
+    expect(updatedResponse.status).toBe(200); const updated = (await updatedResponse.json() as { site: { revision: number } }).site;
+    const publishRace = await Promise.all([1, 2].map(() => call(`/v1/admin/sites/${created.id}/publish`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: updated.revision, confirmation: "PUBLISH SITE" }) })));
+    expect(publishRace.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM site_versions WHERE site_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    const publicRoot = await call(`/v1/public/sites/${created.slug}?path=/`).then((response) => response.json()) as { site: { version: number; page: { title: string } }; hosting: Record<string, unknown> };
+    expect(publicRoot).toMatchObject({ site: { version: 1, page: { title: "Operator field guide" } }, hosting: { mode: "openoperator_path", custom_domain_active: false } });
+    expect(await call(`/v1/public/sites/${created.slug}?path=/method`).then((response) => response.json())).toMatchObject({ site: { page: { id: "method", title: "The method" } } });
+    const detail = await call(`/v1/admin/sites/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as { site: { revision: number } };
+    expect((await call(`/v1/admin/sites/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Operator field guide", pages: [{ ...pages[0], title: "Changed draft" }, pages[1]], theme, if_revision: detail.site.revision }) })).status).toBe(200);
+    expect(await call(`/v1/public/sites/${created.slug}?path=/`).then((response) => response.json())).toMatchObject({ site: { page: { title: "Operator field guide" } } });
+    await expect(env.DB.prepare("UPDATE site_versions SET pages='[]' WHERE site_id=?").bind(created.id).run()).rejects.toThrow(/immutable/);
+    const latest = await call(`/v1/admin/sites/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as { site: { revision: number } };
+    expect((await call(`/v1/admin/sites/${created.id}/revoke`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: latest.site.revision, confirmation: "REVOKE SITE" }) })).status).toBe(200);
+    expect((await call(`/v1/public/sites/${created.slug}?path=/`)).status).toBe(404);
+  });
+
   it("keeps a provider-neutral payment ledger immutable, replay-safe, currency-safe, and adjustment-bounded", async () => {
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
@@ -1356,10 +1398,14 @@ describe("authorization and transport security", () => {
       ["/v1/admin/reports/revenue-funnel", "GET"],
       ["/v1/admin/payments/ledger", "GET, POST"],
       ["/v1/admin/surveys", "GET, POST"],
+      ["/v1/admin/sites", "GET, POST"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}`, "GET, PATCH"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}/publish`, "POST"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}/revoke`, "POST"],
       [`/v1/admin/surveys/survey_${"a".repeat(32)}/responses`, "GET"],
+      [`/v1/admin/sites/site_${"a".repeat(32)}`, "GET, PATCH"],
+      [`/v1/admin/sites/site_${"a".repeat(32)}/publish`, "POST"],
+      [`/v1/admin/sites/site_${"a".repeat(32)}/revoke`, "POST"],
       [`/v1/admin/payments/ledger/pay_${"a".repeat(32)}/adjustments`, "POST"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],

@@ -166,6 +166,31 @@ test("ships a functional responsive versioned survey surface", async () => {
   assert.match(migration, /survey_responses_survey_idempotency_unique/);
 });
 
+test("ships a bounded responsive immutable hosted-path Sites publisher", async () => {
+  const [dashboard, workspace, publicSite, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/SitesWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/site/[slug]/PublicSite.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0053_sites_core.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "sites", label: "Sites"/);
+  assert.match(dashboard, /<SitesWorkspace active=\{activeView === "sites"\}/);
+  assert.match(workspace, /CONFIRM PUBLISH SITE/);
+  assert.match(workspace, /CONFIRM REVOKE SITE/);
+  assert.match(workspace, /Custom domain, scripts, uploads, CSS injection, and analytics injection are disabled/);
+  assert.match(workspace, /ORDERED COMPONENTS/);
+  assert.match(publicSite, /Custom domains are not active/);
+  assert.match(publicSite, /OPENOPERATOR SITE/);
+  assert.match(publicSite, /document\.title = site\.page\.title/);
+  assert.match(publicSite, /meta\[name="description"\]/);
+  assert.doesNotMatch(publicSite, /dangerouslySetInnerHTML/);
+  assert.match(styles, /\.published-site\{/);
+  assert.match(styles, /@media\(max-width:700px\)\{\.sites-workspace/);
+  assert.match(migration, /site_versions_immutable_update/);
+  assert.match(migration, /site_versions_site_version_unique/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);
@@ -265,6 +290,20 @@ test("lets independently authenticated routes reach their own credential checks"
   assert.equal(source.status, 401);
   assert.equal(agent.status, 401);
   assert.equal(scheduler.status, 401);
+  const [surveyApi, siteApi, surveyPage, sitePage, robots] = await Promise.all([
+    worker.fetch(new Request("http://localhost/v1/public/surveys/example-survey"), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/v1/public/sites/example-site?path=/"), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/s/example-survey", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/site/example-site", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/robots.txt"), productionLikeEnv, ctx),
+  ]);
+  assert.notEqual(surveyApi.status, 503);
+  assert.notEqual(siteApi.status, 503);
+  assert.equal(surveyPage.status, 200);
+  assert.match(surveyPage.headers.get("x-robots-tag"), /noindex/);
+  assert.equal(sitePage.status, 200);
+  assert.equal(sitePage.headers.get("x-robots-tag"), null);
+  assert.match(await robots.text(), /Allow: \/site\//);
 });
 
 test("does not turn the local browser convenience flag into a raw API authentication bypass", async () => {
@@ -534,7 +573,7 @@ test("exposes a public health check without exposing CRM data", async () => {
 
   const robots = await worker.fetch(new Request("http://localhost/robots.txt"), env, ctx);
   assert.equal(robots.status, 200);
-  assert.equal(await robots.text(), "User-agent: *\nDisallow: /\n");
+  assert.equal(await robots.text(), "User-agent: *\nDisallow: /\nAllow: /site/\n");
   assert.match(robots.headers.get("x-robots-tag") || "", /noindex/);
 
   const sitemap = await worker.fetch(new Request("http://localhost/sitemap.xml"), env, ctx);
