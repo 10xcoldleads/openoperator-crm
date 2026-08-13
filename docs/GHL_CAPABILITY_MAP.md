@@ -13,7 +13,7 @@ This map comes from read-only observation of a configured GoHighLevel client sub
 | Sites | Funnels, websites, stores, webinars, forms, surveys, quizzes, chat, QR | Partial: secure Forms, Surveys, and bounded hosted-path Sites are implemented; stores, webinars, chat, QR, and custom domains are absent |
 | Payments | Proposals, estimates and provider connection | Partial: append-only provider-neutral payment evidence is implemented; processors, proposals, estimates, payouts, and reconciliation are absent |
 | Marketing | Social planning and brand assets | Partial: bounded consent-aware Resend email campaigns are implemented; social planning and brand assets are absent |
-| Reputation | Review/reputation overview | Planned active slice: first-party review requests and private feedback; third-party review ingestion and replies remain absent |
+| Reputation | Review/reputation overview | Partial: governed first-party review requests and private feedback are implemented; third-party ownership verification, review ingestion, synchronization, and public replies remain absent |
 | Reporting | Custom, ads, calls, agents, appointments, local audit | Core operational summaries implemented; ad/call provider reports require adapters |
 | Configuration | Staff, roles, pipelines, calendars, email, phone, objects, fields, domains, integrations, audit logs | Core workspace/roles/objects/fields/integrations/audit implemented |
 

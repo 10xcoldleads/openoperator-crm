@@ -80,6 +80,30 @@ test("ships a functional responsive secure forms surface", async () => {
   assert.match(migration, /form_versions_form_version_unique/);
 });
 
+test("ships governed first-party review requests and private feedback", async () => {
+  const [dashboard, workspace, feedback, unsubscribe, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ReviewRequestsWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/feedback/FeedbackClient.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/unsubscribe/UnsubscribeClient.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0055_review_requests.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "reviews", label: "Review requests"/);
+  assert.match(dashboard, /<ReviewRequestsWorkspace active=\{activeView === "reviews"\}/);
+  assert.match(workspace, /NO REVIEW GATING/);
+  assert.match(workspace, /SEND REVIEW REQUEST/);
+  assert.match(workspace, /REVOKE REVIEW DESTINATION/);
+  assert.match(feedback, /privacy_accepted: privacy/);
+  assert.match(feedback, /same public-review link is available to everyone, for every rating/i);
+  assert.match(feedback, /history\.replaceState\(null, "", "\/feedback"\)/);
+  assert.match(unsubscribe, /review-request and marketing email permission/);
+  assert.match(styles, /@media\(max-width:760px\)\{\.reviews-hero/);
+  assert.match(migration, /review_requests_feedback_token_hash_unique/);
+  assert.match(migration, /review request identity is immutable/);
+  assert.match(migration, /review feedback is immutable/);
+});
+
 test("ships a functional responsive local-first booking surface", async () => {
   const [dashboard, workspace, publicBooking, manageBooking, styles, migration] = await Promise.all([
     readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
@@ -208,7 +232,7 @@ test("ships a bounded consent-aware Resend marketing campaign surface", async ()
   assert.match(workspace, /Provider acceptance is not delivery or an open/);
   assert.match(workspace, /HTML, tracking, schedules, social publishing, and unlimited sends are absent/);
   assert.match(unsubscribe, /history\.replaceState\(null, "", "\/unsubscribe"\)/);
-  assert.match(unsubscribe, /changes marketing email permission only/);
+  assert.match(unsubscribe, /changes review-request and marketing email permission only/);
   assert.match(styles, /@media\(max-width:560px\)\{\.marketing-workspace/);
   assert.match(migration, /marketing_campaign_versions_immutable_update/);
   assert.match(migration, /marketing_campaign_recipients_identity_immutable/);
@@ -314,18 +338,21 @@ test("lets independently authenticated routes reach their own credential checks"
   assert.equal(source.status, 401);
   assert.equal(agent.status, 401);
   assert.equal(scheduler.status, 401);
-  const [surveyApi, siteApi, unsubscribeApi, surveyPage, sitePage, unsubscribePage, robots] = await Promise.all([
+  const [surveyApi, siteApi, unsubscribeApi, feedbackApi, surveyPage, sitePage, unsubscribePage, feedbackPage, robots] = await Promise.all([
     worker.fetch(new Request("http://localhost/v1/public/surveys/example-survey"), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/v1/public/sites/example-site?path=/"), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/v1/public/marketing/unsubscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "invalid" }) }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/v1/public/reviews/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "invalid" }) }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/s/example-survey", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/site/example-site", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/unsubscribe", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/feedback", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
     worker.fetch(new Request("http://localhost/robots.txt"), productionLikeEnv, ctx),
   ]);
   assert.notEqual(surveyApi.status, 503);
   assert.notEqual(siteApi.status, 503);
   assert.notEqual(unsubscribeApi.status, 503);
+  assert.notEqual(feedbackApi.status, 503);
   assert.equal(surveyPage.status, 200);
   assert.match(surveyPage.headers.get("x-robots-tag"), /noindex/);
   assert.equal(sitePage.status, 200);
@@ -333,6 +360,9 @@ test("lets independently authenticated routes reach their own credential checks"
   assert.equal(unsubscribePage.status, 200);
   assert.match(unsubscribePage.headers.get("x-robots-tag"), /noindex/);
   assert.equal(unsubscribePage.headers.get("cache-control"), "private, no-store");
+  assert.equal(feedbackPage.status, 200);
+  assert.match(feedbackPage.headers.get("x-robots-tag"), /noindex/);
+  assert.equal(feedbackPage.headers.get("cache-control"), "private, no-store");
   assert.match(await robots.text(), /Allow: \/site\//);
 });
 

@@ -92,6 +92,7 @@ function usesIndependentCredential(pathname: string): boolean {
     /^\/v1\/public\/sites\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
     /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(pathname) ||
     pathname === "/v1/public/marketing/unsubscribe" || pathname === "/unsubscribe" ||
+    pathname === "/v1/public/reviews/session" || pathname === "/v1/public/reviews/feedback" || pathname === "/feedback" ||
     /^\/v1\/public\/booking\/[a-z0-9][a-z0-9-]{2,79}(?:\/appointments)?$/.test(pathname) ||
     pathname === "/v1/public/appointments/manage" ||
     /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(pathname) ||
@@ -231,7 +232,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 31;
+const RECOVERY_SCHEMA_VERSION = 32;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -245,6 +246,7 @@ type RecoveryTable =
   | "surveys" | "survey_versions" | "survey_responses"
   | "sites" | "site_versions"
   | "marketing_campaigns" | "marketing_campaign_versions" | "marketing_campaign_recipients"
+  | "review_destinations" | "review_requests" | "review_feedback"
   | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
   | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
@@ -290,6 +292,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   marketing_campaigns: { columns: ["id", "workspace_id", "name", "status", "subject", "body_text", "contact_ids", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   marketing_campaign_versions: { columns: ["id", "workspace_id", "campaign_id", "version", "subject", "body_text", "selected_contact_ids", "exclusion_summary", "published_by", "published_at"] },
   marketing_campaign_recipients: { columns: ["id", "workspace_id", "campaign_id", "campaign_version_id", "contact_id", "email", "first_name", "last_name", "consent_revision", "unsubscribe_token_hash", "status", "attempt_count", "provider_email_id", "response_status", "error", "sent_at", "updated_at"] },
+  review_destinations: { columns: ["id", "workspace_id", "name", "business_name", "review_url", "status", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  review_requests: { columns: ["id", "workspace_id", "destination_id", "contact_id", "email", "first_name", "business_name", "review_url", "subject", "body_text", "feedback_token_hash", "unsubscribe_token_hash", "status", "attempt_count", "provider_email_id", "response_status", "error", "sent_at", "created_by", "created_at", "updated_at"] },
+  review_feedback: { columns: ["id", "workspace_id", "request_id", "idempotency_key", "rating", "feedback", "privacy_text", "ip_hash", "user_agent", "submitted_at"] },
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
@@ -2007,6 +2012,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/surveys": ["GET", "POST"],
     "/v1/admin/sites": ["GET", "POST"],
     "/v1/admin/marketing-campaigns": ["GET", "POST"],
+    "/v1/admin/review-destinations": ["GET", "POST"],
+    "/v1/admin/review-requests": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
     "/v1/admin/reports/revenue-funnel": ["GET"],
     "/v1/admin/payments/ledger": ["GET", "POST"],
@@ -2021,6 +2028,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/sites\/site_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/marketing-campaigns\/mkt_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/marketing-campaigns\/mkt_[a-f0-9]{32}\/(publish|launch|retry|cancel)$/, ["POST"]],
+    [/^\/v1\/admin\/review-destinations\/revdest_[a-f0-9]{32}$/, ["PATCH"]],
+    [/^\/v1\/admin\/review-requests\/revreq_[a-f0-9]{32}\/retry$/, ["POST"]],
     [/^\/v1\/admin\/custom-fields\/cfld_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/views$/, ["GET", "POST"]],
@@ -2475,6 +2484,11 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     const version = tables.marketing_campaign_versions.find((candidate) => candidate.id === row.campaign_version_id);
     if (version?.campaign_id !== row.campaign_id) throw new ApiError(400, "Marketing recipient version belongs to another campaign");
   }
+  for (const row of tables.review_requests) {
+    requireReference("review_requests", row, "destination_id", "review_destinations");
+    requireReference("review_requests", row, "contact_id", "contacts");
+  }
+  for (const row of tables.review_feedback) requireReference("review_feedback", row, "request_id", "review_requests");
   for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
   for (const row of tables.booking_appointments) {
     requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
@@ -2630,6 +2644,32 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
       throw new ApiError(400, "Backup contains an invalid marketing recipient");
     }
     unsubscribeHashes.add(String(row.unsubscribe_token_hash));
+  }
+  const reviewFeedbackHashes = new Set<string>(); const reviewUnsubscribeHashes = new Set<string>(); const feedbackRequests = new Set<string>();
+  for (const row of tables.review_destinations) {
+    if (!/^revdest_[a-f0-9]{32}$/.test(String(row.id)) || !["active", "revoked"].includes(String(row.status)) ||
+      typeof row.name !== "string" || !row.name.trim() || String(row.name).length > 120 ||
+      typeof row.business_name !== "string" || !row.business_name.trim() || String(row.business_name).length > 160 ||
+      !safeExternalReviewUrl(String(row.review_url)) || !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid review destination");
+    }
+  }
+  for (const row of tables.review_requests) {
+    if (!/^revreq_[a-f0-9]{32}$/.test(String(row.id)) || !validEmail(normalizeEmail(row.email)) ||
+      !safeExternalReviewUrl(String(row.review_url)) || !["pending", "sending", "succeeded", "failed"].includes(String(row.status)) ||
+      !Number.isInteger(row.attempt_count) || Number(row.attempt_count) < 0 || Number(row.attempt_count) > 10 ||
+      !/^[a-f0-9]{64}$/.test(String(row.feedback_token_hash)) || !/^[a-f0-9]{64}$/.test(String(row.unsubscribe_token_hash)) ||
+      reviewFeedbackHashes.has(String(row.feedback_token_hash)) || reviewUnsubscribeHashes.has(String(row.unsubscribe_token_hash))) {
+      throw new ApiError(400, "Backup contains an invalid review request");
+    }
+    reviewFeedbackHashes.add(String(row.feedback_token_hash)); reviewUnsubscribeHashes.add(String(row.unsubscribe_token_hash));
+  }
+  for (const row of tables.review_feedback) {
+    if (!/^revfb_[a-f0-9]{32}$/.test(String(row.id)) || feedbackRequests.has(String(row.request_id)) ||
+      !Number.isInteger(row.rating) || Number(row.rating) < 1 || Number(row.rating) > 5 ||
+      (row.feedback !== null && (typeof row.feedback !== "string" || String(row.feedback).length > 2000)) ||
+      typeof row.privacy_text !== "string" || !row.privacy_text.trim()) throw new ApiError(400, "Backup contains invalid review feedback");
+    feedbackRequests.add(String(row.request_id));
   }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
@@ -5336,6 +5376,25 @@ function safeMarketingCampaign(row: Record<string, unknown>) {
     contact_ids: JSON.parse(String(row.contact_ids)), published_version_id: row.published_version_id, revision: row.revision,
     created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at };
 }
+function safeExternalReviewUrl(value: string) {
+  if (!value || value.length > 500) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    return url.toString();
+  } catch { return null; }
+}
+function safeReviewDestination(row: Record<string, unknown>) {
+  return { id: row.id, name: row.name, business_name: row.business_name, review_url: row.review_url, status: row.status,
+    ownership_verified: false, revision: row.revision, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at };
+}
+function safeReviewRequest(row: Record<string, unknown>) {
+  return { id: row.id, destination_id: row.destination_id, contact_id: row.contact_id, email: row.email, first_name: row.first_name,
+    business_name: row.business_name, review_url: row.review_url, subject: row.subject, body_text: row.body_text, status: row.status,
+    attempt_count: row.attempt_count, provider_email_id: row.provider_email_id, response_status: row.response_status, error: row.error,
+    sent_at: row.sent_at, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
+    feedback: row.feedback_id ? { id: row.feedback_id, rating: row.rating, feedback: row.feedback, submitted_at: row.feedback_submitted_at } : null };
+}
 function unsubscribeSecret(env: FrameworkEnv) {
   if (!env.UNSUBSCRIBE_SIGNING_KEY || env.UNSUBSCRIBE_SIGNING_KEY.length < 32) throw new ApiError(503, "Unsubscribe signing is not configured");
   return env.UNSUBSCRIBE_SIGNING_KEY;
@@ -5344,6 +5403,14 @@ async function marketingUnsubscribeToken(env: FrameworkEnv, recipient: Record<st
   const payload = `${recipient.id}.${recipient.workspace_id}.${recipient.contact_id}.${normalizeEmail(String(recipient.email))}.${recipient.consent_revision}`;
   const signature = await webhookSignature(unsubscribeSecret(env), "marketing-unsubscribe:v1", payload);
   return `munsub_${recipient.id}_${signature}`;
+}
+async function reviewFeedbackToken(env: FrameworkEnv, request: Record<string, unknown>) {
+  const payload = `${request.id}.${request.workspace_id}.${request.contact_id}.${normalizeEmail(String(request.email))}`;
+  return `revfb_${request.id}_${await webhookSignature(unsubscribeSecret(env), "review-feedback:v1", payload)}`;
+}
+async function reviewUnsubscribeToken(env: FrameworkEnv, request: Record<string, unknown>) {
+  const payload = `${request.id}.${request.workspace_id}.${request.contact_id}.${normalizeEmail(String(request.email))}`;
+  return `revunsub_${request.id}_${await webhookSignature(unsubscribeSecret(env), "review-unsubscribe:v1", payload)}`;
 }
 async function deliverMarketingRecipient(env: FrameworkEnv, access: WorkspaceAccess, request: Request,
   connection: Record<string, unknown>, campaign: Record<string, unknown>, recipientId: string, retry: boolean) {
@@ -5390,6 +5457,41 @@ async function deliverMarketingRecipient(env: FrameworkEnv, access: WorkspaceAcc
     env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
       SELECT ?,?,'user',?,?,?,?,NULL,?,?,? WHERE changes()>0`)
       .bind(id("audit"), access.workspaceId, access.email, action, "marketing_campaign_recipient", recipient.id, JSON.stringify(after), requestId(request), now),
+  ]);
+}
+async function deliverReviewRequest(env: FrameworkEnv, access: WorkspaceAccess, request: Request, reviewRequestId: string, retry: boolean) {
+  const row = await env.DB.prepare(`SELECT r.*,d.status destination_status FROM review_requests r
+    JOIN review_destinations d ON d.id=r.destination_id AND d.workspace_id=r.workspace_id WHERE r.workspace_id=? AND r.id=?`)
+    .bind(access.workspaceId, reviewRequestId).first<Record<string, unknown>>();
+  if (!row || row.status !== (retry ? "failed" : "pending") || row.destination_status !== "active") return;
+  const connection = await env.DB.prepare("SELECT * FROM resend_connections WHERE workspace_id=? AND status='active'").bind(access.workspaceId).first<Record<string, unknown>>();
+  if (!connection) throw new ApiError(409, "An active verified Resend connection is required");
+  const now = new Date().toISOString();
+  const claimed = await env.DB.prepare(`UPDATE review_requests SET status='sending',attempt_count=attempt_count+1,error=NULL,updated_at=?
+    WHERE id=? AND workspace_id=? AND status=? AND EXISTS(SELECT 1 FROM communication_consents cc
+      WHERE cc.workspace_id=review_requests.workspace_id AND cc.contact_id=review_requests.contact_id AND cc.channel='email'
+        AND cc.status='opted_in' AND cc.basis='express')`).bind(now, row.id, access.workspaceId, retry ? "failed" : "pending").run();
+  if (!claimed.meta.changes) {
+    await env.DB.prepare(`UPDATE review_requests SET status='failed',error='Express email consent is no longer active',updated_at=?
+      WHERE id=? AND workspace_id=? AND status=?`).bind(new Date().toISOString(), row.id, access.workspaceId, retry ? "failed" : "pending").run();
+    throw new ApiError(409, "Express email consent is no longer active");
+  }
+  const feedbackToken = await reviewFeedbackToken(env, row); const unsubscribeToken = await reviewUnsubscribeToken(env, row);
+  if (await sha256(feedbackToken) !== row.feedback_token_hash || await sha256(unsubscribeToken) !== row.unsubscribe_token_hash) throw new ApiError(500, "Review request credential evidence is inconsistent");
+  const origin = new URL(request.url).origin;
+  const text = `${row.body_text}\n\nShare private feedback or use the same public review link regardless of rating: ${origin}/feedback#${feedbackToken}\n\nStop review-request and marketing email: ${origin}/unsubscribe#${unsubscribeToken}\n\nThe public review destination was supplied by the workspace operator and is not ownership-verified by OpenOperator.`;
+  let provider: Awaited<ReturnType<typeof resendProviderSend>>;
+  try { provider = await resendProviderSend(env, connection, access.workspaceId, String(row.email), String(row.subject), text, `review:${row.id}`); }
+  catch { provider = { ok: false, status: 502, error: "Resend could not be reached" }; }
+  const completedAt = new Date().toISOString(); const action = provider.ok ? "review_request.accepted" : "review_request.failed";
+  await env.DB.batch([
+    provider.ok ? env.DB.prepare(`UPDATE review_requests SET status='succeeded',provider_email_id=?,response_status=?,error=NULL,sent_at=?,updated_at=?
+      WHERE id=? AND workspace_id=? AND status='sending'`).bind(provider.providerEmailId, provider.status, completedAt, completedAt, row.id, access.workspaceId)
+      : env.DB.prepare(`UPDATE review_requests SET status='failed',response_status=?,error=?,updated_at=? WHERE id=? AND workspace_id=? AND status='sending'`)
+        .bind(provider.status, provider.error, completedAt, row.id, access.workspaceId),
+    env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+      SELECT ?,?,'user',?,?,?,?,NULL,?,?,? WHERE changes()>0`).bind(id("audit"), access.workspaceId, access.email, action, "review_request", row.id,
+        JSON.stringify(provider.ok ? { status: "succeeded", provider_email_id: provider.providerEmailId, response_status: provider.status } : { status: "failed", response_status: provider.status, error: provider.error }), requestId(request), completedAt),
   ]);
 }
 function validateSurveyQuestions(value: unknown): SurveyQuestion[] {
@@ -5600,8 +5702,27 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
     if (Object.keys(body).some((key) => key !== "token")) return json({ error: "Unsubscribe request contains unsupported fields" }, 400);
     const token = optionalString(body.token, "token", 180) || "";
-    if (!/^munsub_mrec_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token)) return json({ error: "Unsubscribe link is invalid" }, 400);
+    if (!/^(?:munsub_mrec|revunsub_revreq)_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token)) return json({ error: "Unsubscribe link is invalid" }, 400);
     const tokenHash = await sha256(token);
+    if (token.startsWith("revunsub_")) {
+      const reviewRequest = await env.DB.prepare("SELECT * FROM review_requests WHERE unsubscribe_token_hash=?").bind(tokenHash).first<Record<string, unknown>>();
+      if (!reviewRequest) return json({ error: "Unsubscribe link is invalid" }, 404);
+      let expected: string; try { expected = await reviewUnsubscribeToken(env, reviewRequest); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Unsubscribe is unavailable" }, 503); }
+      if (expected !== token) return json({ error: "Unsubscribe link is invalid" }, 400);
+      const now = new Date().toISOString(); const changeId = id("chg");
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO communication_consents(id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+          VALUES(?,?,?,'email','opted_out','manual_suppression','One-click review-request unsubscribe',?,1,?,'public-unsubscribe',?,?)
+          ON CONFLICT(workspace_id,contact_id,channel) DO UPDATE SET status='opted_out',basis='manual_suppression',evidence=excluded.evidence,
+            captured_at=excluded.captured_at,revision=communication_consents.revision+1,change_id=excluded.change_id,created_by=excluded.created_by,updated_at=excluded.updated_at
+            WHERE communication_consents.status<>'opted_out'`)
+          .bind(id("consent"), reviewRequest.workspace_id, reviewRequest.contact_id, now, changeId, now, now),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'public','unsubscribe','review_request.unsubscribed','contact',?,NULL,?,?,? WHERE changes()>0`)
+          .bind(id("audit"), reviewRequest.workspace_id, reviewRequest.contact_id, JSON.stringify({ channel: "email", status: "opted_out", basis: "manual_suppression", request_id: reviewRequest.id }), requestId(request), now),
+      ]);
+      return json({ ok: true, status: "unsubscribed", message: "You will no longer receive review-request or marketing email from this workspace." });
+    }
     const recipient = await env.DB.prepare(`SELECT r.*,c.status campaign_status FROM marketing_campaign_recipients r
       JOIN marketing_campaigns c ON c.id=r.campaign_id AND c.workspace_id=r.workspace_id WHERE r.unsubscribe_token_hash=?`)
       .bind(tokenHash).first<Record<string, unknown>>();
@@ -5623,6 +5744,56 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
         WHERE workspace_id=? AND contact_id=? AND status IN ('queued','failed')`).bind(now, recipient.workspace_id, recipient.contact_id),
     ]);
     return json({ ok: true, status: "unsubscribed", message: "You will no longer receive marketing email from this workspace." });
+  }
+
+  if (url.pathname === "/v1/public/reviews/session") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
+    if (Object.keys(body).some((key) => key !== "token")) return json({ error: "Session request contains unsupported fields" }, 400);
+    const token = optionalString(body.token, "token", 180) || "";
+    if (!/^revfb_revreq_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token)) return json({ error: "Feedback link is invalid" }, 400);
+    const row = await env.DB.prepare(`SELECT r.*,f.id feedback_id,f.rating,f.feedback,f.submitted_at feedback_submitted_at
+      FROM review_requests r LEFT JOIN review_feedback f ON f.workspace_id=r.workspace_id AND f.request_id=r.id WHERE r.feedback_token_hash=?`)
+      .bind(await sha256(token)).first<Record<string, unknown>>();
+    if (!row || await reviewFeedbackToken(env, row) !== token) return json({ error: "Feedback link is invalid" }, 404);
+    return json({ session: { business_name: row.business_name, review_url: row.review_url, external_destination_verified: false,
+      already_submitted: Boolean(row.feedback_id), privacy_text: "Your rating and feedback are stored privately in this CRM. Nothing is posted to the external review site automatically.",
+      review_policy: "The same public review link is available to every recipient regardless of rating." } });
+  }
+
+  if (url.pathname === "/v1/public/reviews/feedback") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
+    if (Object.keys(body).some((key) => !["token", "rating", "feedback", "privacy_accepted", "idempotency_key", "website"].includes(key))) return json({ error: "Feedback contains unsupported fields" }, 400);
+    if (typeof body.website === "string" && body.website.trim()) return json({ ok: true, accepted: true }, 202);
+    if (body.privacy_accepted !== true) return json({ error: "Privacy acknowledgement is required" }, 400);
+    const token = optionalString(body.token, "token", 180) || ""; const rating = Number(body.rating);
+    const feedback = typeof body.feedback === "string" ? body.feedback.trim() : ""; const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!/^revfb_revreq_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token) || !Number.isInteger(rating) || rating < 1 || rating > 5 || feedback.length > 2000 ||
+      !/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) return json({ error: "A valid link, 1–5 rating, bounded feedback, and idempotency key are required" }, 400);
+    const reviewRequest = await env.DB.prepare("SELECT * FROM review_requests WHERE feedback_token_hash=?").bind(await sha256(token)).first<Record<string, unknown>>();
+    if (!reviewRequest || await reviewFeedbackToken(env, reviewRequest) !== token) return json({ error: "Feedback link is invalid" }, 404);
+    const existing = await env.DB.prepare("SELECT * FROM review_feedback WHERE workspace_id=? AND request_id=?")
+      .bind(reviewRequest.workspace_id, reviewRequest.id).first<Record<string, unknown>>();
+    if (existing) return Number(existing.rating) === rating && String(existing.feedback || "") === feedback
+      ? json({ ok: true, duplicate: true, review_url: reviewRequest.review_url }) : json({ error: "Feedback was already submitted for this request" }, 409);
+    const ip = request.headers.get("cf-connecting-ip"); const ipHash = ip ? await sha256(`${reviewRequest.workspace_id}:${ip}`) : null; const now = new Date().toISOString();
+    if (ipHash) { const recent = await env.DB.prepare("SELECT COUNT(*) total FROM review_feedback WHERE workspace_id=? AND ip_hash=? AND submitted_at>?")
+      .bind(reviewRequest.workspace_id, ipHash, new Date(Date.now() - 600_000).toISOString()).first<{ total: number }>();
+      if (Number(recent?.total || 0) >= 10) return json({ error: "Too many feedback submissions. Try again later." }, 429, { "retry-after": "600" }); }
+    const privacyText = "Your rating and feedback are stored privately in this CRM. Nothing is posted to the external review site automatically.";
+    try { await env.DB.batch([
+      env.DB.prepare(`INSERT INTO review_feedback(id,workspace_id,request_id,idempotency_key,rating,feedback,privacy_text,ip_hash,user_agent,submitted_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(id("revfb"), reviewRequest.workspace_id, reviewRequest.id, idempotencyKey, rating, feedback || null, privacyText, ipHash, (request.headers.get("user-agent") || "").slice(0, 300) || null, now),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        VALUES(?,?,'public','feedback','review_request.feedback_recorded','review_request',?,NULL,?,?,?)`)
+        .bind(id("audit"), reviewRequest.workspace_id, reviewRequest.id, JSON.stringify({ rating, has_feedback: Boolean(feedback) }), requestId(request), now),
+    ]); } catch {
+      const raced = await env.DB.prepare("SELECT rating,feedback FROM review_feedback WHERE workspace_id=? AND request_id=?").bind(reviewRequest.workspace_id, reviewRequest.id).first<Record<string, unknown>>();
+      if (raced && Number(raced.rating) === rating && String(raced.feedback || "") === feedback) return json({ ok: true, duplicate: true, review_url: reviewRequest.review_url });
+      return json({ error: "Feedback was already submitted for this request" }, 409);
+    }
+    return json({ ok: true, duplicate: false, review_url: reviewRequest.review_url }, 201);
   }
 
   const publicFormMatch = url.pathname.match(/^\/v1\/public\/forms\/([a-z0-9][a-z0-9-]{2,79})$/);
@@ -6947,6 +7118,107 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const updated = await env.DB.prepare("SELECT * FROM marketing_campaigns WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
     const counts = await env.DB.prepare(`SELECT status,COUNT(*) count FROM marketing_campaign_recipients WHERE workspace_id=? AND campaign_id=? GROUP BY status`).bind(workspaceId, before.id).all();
     return json({ campaign: safeMarketingCampaign(updated!), recipient_counts: counts.results });
+  }
+
+  if (url.pathname === "/v1/admin/review-destinations" && request.method === "GET") {
+    const rows = await env.DB.prepare("SELECT * FROM review_destinations WHERE workspace_id=? ORDER BY updated_at DESC,id LIMIT 50").bind(workspaceId).all<Record<string, unknown>>();
+    return json({ destinations: rows.results.map(safeReviewDestination) });
+  }
+  if (url.pathname === "/v1/admin/review-destinations" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name", "business_name", "review_url"].includes(key))) return json({ error: "Destination contains unsupported fields" }, 400);
+    const name = optionalString(body.name, "name", 120) || ""; const businessName = optionalString(body.business_name, "business_name", 160) || "";
+    const reviewUrl = safeExternalReviewUrl(optionalString(body.review_url, "review_url", 500) || "");
+    if (!name || !businessName || !reviewUrl) return json({ error: "name, business_name, and a credential-free HTTPS review_url are required" }, 400);
+    const destinationId = id("revdest"); const now = new Date().toISOString(); const changeId = id("chg");
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO review_destinations(id,workspace_id,name,business_name,review_url,status,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,'active',1,?,?,?,?)`).bind(destinationId, workspaceId, name, businessName, reviewUrl, changeId, access.email, now, now),
+      await auditStatement(env, access, request, "review_destination.created", "review_destination", destinationId, null, { name, business_name: businessName, review_url: reviewUrl, ownership_verified: false }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM review_destinations WHERE workspace_id=? AND id=?").bind(workspaceId, destinationId).first<Record<string, unknown>>();
+    return json({ destination: safeReviewDestination(created!) }, 201);
+  }
+  const reviewDestinationMatch = url.pathname.match(/^\/v1\/admin\/review-destinations\/(revdest_[a-f0-9]{32})$/);
+  if (reviewDestinationMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name", "business_name", "review_url", "status", "if_revision", "confirmation"].includes(key))) return json({ error: "Destination update contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM review_destinations WHERE workspace_id=? AND id=?").bind(workspaceId, reviewDestinationMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Review destination not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Destination changed since it was loaded", code: "edit_conflict" }, 409);
+    const status = optionalString(body.status, "status", 20) || String(before.status);
+    if (!["active", "revoked"].includes(status) || (status === "revoked" && body.confirmation !== "REVOKE REVIEW DESTINATION")) return json({ error: "A valid status and explicit revocation confirmation are required" }, 400);
+    const name = optionalString(body.name, "name", 120) || String(before.name); const businessName = optionalString(body.business_name, "business_name", 160) || String(before.business_name);
+    const reviewUrl = safeExternalReviewUrl(optionalString(body.review_url, "review_url", 500) || String(before.review_url));
+    if (!name || !businessName || !reviewUrl) return json({ error: "Destination fields are invalid" }, 400);
+    const now = new Date().toISOString(); const changeId = id("chg");
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE review_destinations SET name=?,business_name=?,review_url=?,status=?,revision=revision+1,change_id=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND revision=?`).bind(name, businessName, reviewUrl, status, changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,?, 'review_destination',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM review_destinations WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, status === "revoked" ? "review_destination.revoked" : "review_destination.updated", before.id,
+          JSON.stringify(safeReviewDestination(before)), JSON.stringify({ name, business_name: businessName, review_url: reviewUrl, status }), requestId(request), now, workspaceId, before.id, changeId),
+    ]);
+    if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: "Destination changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM review_destinations WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ destination: safeReviewDestination(updated!) });
+  }
+
+  if (url.pathname === "/v1/admin/review-requests" && request.method === "GET") {
+    const requests = await env.DB.prepare(`SELECT r.*,f.id feedback_id,f.rating,f.feedback,f.submitted_at feedback_submitted_at FROM review_requests r
+      LEFT JOIN review_feedback f ON f.workspace_id=r.workspace_id AND f.request_id=r.id WHERE r.workspace_id=? ORDER BY r.created_at DESC,r.id DESC LIMIT 100`)
+      .bind(workspaceId).all<Record<string, unknown>>();
+    const contacts = await env.DB.prepare(`SELECT c.id,c.email,c.first_name,c.last_name,c.status,cc.status consent_status,cc.basis consent_basis
+      FROM contacts c LEFT JOIN communication_consents cc ON cc.workspace_id=c.workspace_id AND cc.contact_id=c.id AND cc.channel='email'
+      WHERE c.workspace_id=? ORDER BY LOWER(c.email),c.id LIMIT 200`).bind(workspaceId).all();
+    const destinations = await env.DB.prepare("SELECT * FROM review_destinations WHERE workspace_id=? ORDER BY updated_at DESC,id LIMIT 50").bind(workspaceId).all<Record<string, unknown>>();
+    const connection = await env.DB.prepare("SELECT id,label,from_email,status FROM resend_connections WHERE workspace_id=? AND status='active'").bind(workspaceId).first();
+    return json({ requests: requests.results.map(safeReviewRequest), contacts: contacts.results, destinations: destinations.results.map(safeReviewDestination), connection: connection || null,
+      boundaries: { external_review_ownership_verified: false, third_party_reviews_ingested: false, public_replies_supported: false, review_gating_supported: false } });
+  }
+  if (url.pathname === "/v1/admin/review-requests" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["destination_id", "contact_id", "subject", "body_text", "confirmation"].includes(key))) return json({ error: "Review request contains unsupported fields" }, 400);
+    if (body.confirmation !== "SEND REVIEW REQUEST") return json({ error: "Explicit send confirmation is required" }, 400);
+    const destinationId = optionalString(body.destination_id, "destination_id", 80) || ""; const contactId = optionalString(body.contact_id, "contact_id", 80) || "";
+    const subject = optionalString(body.subject, "subject", 200) || ""; const bodyText = optionalString(body.body_text, "body_text", 4000) || "";
+    if (!/^revdest_[a-f0-9]{32}$/.test(destinationId) || !/^con_[a-f0-9]{32}$/.test(contactId) || !subject || !bodyText) return json({ error: "A valid destination, Contact, subject, and body are required" }, 400);
+    unsubscribeSecret(env);
+    const destination = await env.DB.prepare("SELECT * FROM review_destinations WHERE workspace_id=? AND id=? AND status='active'").bind(workspaceId, destinationId).first<Record<string, unknown>>();
+    const contact = await env.DB.prepare(`SELECT c.id,c.email,c.first_name,cc.status consent_status,cc.basis consent_basis FROM contacts c
+      JOIN communication_consents cc ON cc.workspace_id=c.workspace_id AND cc.contact_id=c.id AND cc.channel='email'
+      WHERE c.workspace_id=? AND c.id=?`).bind(workspaceId, contactId).first<Record<string, unknown>>();
+    if (!destination) return json({ error: "Active review destination not found" }, 404);
+    if (!contact || !validEmail(normalizeEmail(String(contact.email))) || contact.consent_status !== "opted_in" || contact.consent_basis !== "express") return json({ error: "Contact must have a valid email and current express consent" }, 409);
+    if (!await env.DB.prepare("SELECT 1 ok FROM resend_connections WHERE workspace_id=? AND status='active'").bind(workspaceId).first()) return json({ error: "An active verified Resend connection is required" }, 409);
+    const recent = await env.DB.prepare("SELECT id,status FROM review_requests WHERE workspace_id=? AND destination_id=? AND contact_id=? AND created_at>? ORDER BY created_at DESC LIMIT 1")
+      .bind(workspaceId, destinationId, contactId, new Date(Date.now() - 30 * 86_400_000).toISOString()).first<Record<string, unknown>>();
+    if (recent) return json({ error: `A recent ${recent.status} request already exists for this Contact and destination`, code: "recent_request_exists" }, 409);
+    const reviewRequestId = id("revreq"); const material = { id: reviewRequestId, workspace_id: workspaceId, contact_id: contact.id, email: normalizeEmail(String(contact.email)) };
+    const feedbackHash = await sha256(await reviewFeedbackToken(env, material)); const unsubscribeHash = await sha256(await reviewUnsubscribeToken(env, material));
+    const now = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO review_requests(id,workspace_id,destination_id,contact_id,email,first_name,business_name,review_url,subject,body_text,feedback_token_hash,unsubscribe_token_hash,status,attempt_count,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'pending',0,?,?,?)`).bind(reviewRequestId, workspaceId, destination.id, contact.id, material.email, contact.first_name || null,
+          destination.business_name, destination.review_url, subject, bodyText, feedbackHash, unsubscribeHash, access.email, now, now),
+      await auditStatement(env, access, request, "review_request.created", "review_request", reviewRequestId, null, { destination_id: destination.id, contact_id: contact.id, email: material.email }),
+    ]);
+    await deliverReviewRequest(env, access, request, reviewRequestId, false);
+    const created = await env.DB.prepare(`SELECT r.*,f.id feedback_id,f.rating,f.feedback,f.submitted_at feedback_submitted_at FROM review_requests r
+      LEFT JOIN review_feedback f ON f.workspace_id=r.workspace_id AND f.request_id=r.id WHERE r.workspace_id=? AND r.id=?`).bind(workspaceId, reviewRequestId).first<Record<string, unknown>>();
+    return json({ request: safeReviewRequest(created!) }, 201);
+  }
+  const reviewRetryMatch = url.pathname.match(/^\/v1\/admin\/review-requests\/(revreq_[a-f0-9]{32})\/retry$/);
+  if (reviewRetryMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => key !== "confirmation") || body.confirmation !== "RETRY REVIEW REQUEST") return json({ error: "Explicit retry confirmation is required" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM review_requests WHERE workspace_id=? AND id=?").bind(workspaceId, reviewRetryMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Review request not found" }, 404); if (before.status !== "failed") return json({ error: "Only a failed request can be retried" }, 409);
+    await deliverReviewRequest(env, access, request, String(before.id), true);
+    const updated = await env.DB.prepare(`SELECT r.*,f.id feedback_id,f.rating,f.feedback,f.submitted_at feedback_submitted_at FROM review_requests r
+      LEFT JOIN review_feedback f ON f.workspace_id=r.workspace_id AND f.request_id=r.id WHERE r.workspace_id=? AND r.id=?`).bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ request: safeReviewRequest(updated!) });
   }
 
   if (url.pathname === "/v1/admin/sites" && request.method === "GET") {
@@ -8723,6 +8995,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM mailbox_connections WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM conversation_messages WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM review_feedback WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM review_requests WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM review_destinations WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM marketing_campaign_recipients WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM marketing_campaign_versions WHERE workspace_id=?").bind(workspaceId),
@@ -14255,12 +14530,12 @@ const worker = {
         if (independentlyAuthenticated) return independentlyAuthenticated;
         if ((/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) || /^\/s\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) ||
           /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(url.pathname) ||
-          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname) || url.pathname === "/unsubscribe") && request.method === "GET") {
+          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname) || url.pathname === "/unsubscribe" || url.pathname === "/feedback") && request.method === "GET") {
           const response = await handler.fetch(request, env, ctx);
           const headers = new Headers(response.headers);
           for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
           if (url.pathname.startsWith("/site/")) headers.delete("x-robots-tag");
-          headers.set("cache-control", url.pathname === "/unsubscribe" ? "private, no-store" : "public, max-age=60, stale-while-revalidate=300");
+          headers.set("cache-control", ["/unsubscribe", "/feedback"].includes(url.pathname) ? "private, no-store" : "public, max-age=60, stale-while-revalidate=300");
           return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
         }
       }

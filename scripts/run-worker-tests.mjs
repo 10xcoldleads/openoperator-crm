@@ -3,9 +3,10 @@ import { spawnSync } from "node:child_process";
 const stressPattern = "\\[stress\\]";
 const extendedPattern = "\\[extended\\]";
 const marketingPattern = "\\[marketing\\]";
+const reviewsPattern = "\\[reviews\\]";
 const authDomainPattern = "\\[auth-domain\\]";
 const authContractPattern = "\\[auth-contract\\]";
-const isolatedPattern = `(${stressPattern}|${extendedPattern}|${marketingPattern}|${authDomainPattern}|${authContractPattern})`;
+const isolatedPattern = `(${stressPattern}|${extendedPattern}|${marketingPattern}|${reviewsPattern}|${authDomainPattern}|${authContractPattern})`;
 const domainPattern = "(automation|workflow|contact|opportunity|pipeline|task|recovery|webhook)";
 const platformBoundaryPatterns = [
   "authorization and transport security",
@@ -16,6 +17,7 @@ const shards = [
   ["stress", stressPattern],
   ["extended", extendedPattern],
   ["marketing", marketingPattern],
+  ["reviews", reviewsPattern],
   ["auth-domain", `^(?!.*${marketingPattern}).*${authDomainPattern}.*$`],
   ["auth-contract", authContractPattern],
   ["core-domain", `^(?!.*${isolatedPattern}).*${domainPattern}.*$`],
