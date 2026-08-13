@@ -114,7 +114,7 @@ Survey local evidence on 2026-08-13: build, TypeScript, ESLint, Twenty provenanc
 
 Survey Edge acceptance: an admin created `Browser acceptance pulse`, saved its introduction, used the two-step publication control, and opened its frozen V1 public route. The public page displayed the required rating and separate privacy acknowledgement with the explicit text `No marketing consent is requested`, accepted a real 5/5 response, and rendered its success state. The admin response evidence then showed one V1 response, a 5.0/5 aggregate, and the recent immutable response entry. At 390px, the public page reported `innerWidth=scrollWidth=bodyWidth=390`; the admin page reported `innerWidth=390`, `bodyWidth=scrollWidth=375`, and a 323px survey layout. Both pages had zero application-origin console errors. Browser QA initially failed because a build hot reload left the local Worker without a generated RSC manifest; restarting from the completed build restored the server and proved the final journey.
 
-Draft PR #12 is open at `https://github.com/10xcoldleads/openoperator-crm/pull/12` from branch `agent/surveys`. CodeQL analysis/result and GitGuardian pass; clean Linux `verify` is pending. Do not merge until `verify` passes and the PR is updated to ready-for-review.
+PR #12 is open at `https://github.com/10xcoldleads/openoperator-crm/pull/12` from branch `agent/surveys`. On commit `3b90dec`, clean Linux `verify` passed in 4m51s; CodeQL analysis and result passed; GitGuardian passed. The PR is ready for merge after this evidence-only memory update receives equivalent gates.
 
 ## Next milestone sequence
 
