@@ -44,3 +44,4 @@ audit-*.json
 **/.wrangler/
 /outputs/
 /work/
+/.local-dev*.log

@@ -8,6 +8,7 @@ This project is an independent open-source implementation. It is not affiliated 
 
 - Multi-workspace membership and role enforcement
 - Contacts, companies, deduplication, custom fields, saved views, imports, notes, and activity history
+- Consent-aware email conversations with persisted threads, explicit mailbox sync, suppression, and replay-safe Resend delivery
 - Configurable pipelines, stages, opportunities, forecasting, and optimistic updates
 - Tasks with contact/opportunity relationships and lifecycle controls
 - Visual event-driven automations with conditions, MATCH/ELSE branches, typed variables, run caps, traces, retries, and cancellation

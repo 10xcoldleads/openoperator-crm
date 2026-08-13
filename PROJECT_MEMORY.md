@@ -82,14 +82,15 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 Branch: `agent/conversations-core`.
 
-Milestone: build the first truthful Conversations vertical slice by extending the existing mailbox metadata and Resend boundaries. It must include a workspace-scoped thread/message ledger, contact association, consent and suppression policy, idempotent delivery state, an inbox UI, negative authorization tests, concurrency tests, and browser acceptance. Do not expose Conversations navigation until the entire primary journey passes.
+Milestone completed locally: the first truthful Conversations vertical slice extends the existing mailbox metadata and Resend boundaries. It includes a workspace-scoped thread/message ledger, stable provider thread identity, contact association, consent and suppression policy, idempotent delivery state, an inbox UI, negative authorization tests, concurrency tests, and Edge desktop/mobile acceptance. Conversations may remain visible because its primary journey passed. Publish the branch and merge only through green CI.
+
+Evidence on 2026-08-13: `npm test` passed (32 rendered/runtime checks, all 187 worker tests across six shards, 25 ingestion tests); `npm run lint` passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Edge acceptance proved desktop navigation, consent-blocked send, zero console errors, and distinct 48px mobile navigation hit targets with no document overflow.
 
 ## Next milestone sequence
 
-1. Conversations core: durable inbound/outbound ledger, consent/suppression, delivery receipts, contact context, inbox UI.
-2. Secure forms: versioned form definitions, public write-only intake, consent evidence, publish/revoke lifecycle.
-3. Booking: availability rules, public booking, conflict prevention, cancellation/reschedule, provider adapter boundary.
-4. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
+1. Secure forms: versioned form definitions, public write-only intake, consent evidence, publish/revoke lifecycle.
+2. Booking: availability rules, public booking, conflict prevention, cancellation/reschedule, provider adapter boundary.
+3. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
 5. Payments: provider-neutral ledger before any Stripe surface.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.

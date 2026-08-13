@@ -220,7 +220,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 24;
+const RECOVERY_SCHEMA_VERSION = 25;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -228,7 +228,8 @@ type RecoveryTable =
   | "custom_object_definitions" | "custom_object_views" | "custom_object_records" | "custom_object_relations"
   | "saved_views" | "opportunities" | "tasks" | "automation_rules" | "automation_runs"
   | "visitor_connectors" | "audience_imports" | "visitor_profiles" | "audience_import_members"
-  | "visitor_events" | "visitor_intent_cases" | "mailbox_connections";
+  | "visitor_events" | "visitor_intent_cases" | "mailbox_connections"
+  | "communication_consents" | "conversation_threads" | "conversation_messages";
 type RecoverySpec = { columns: string[] };
 const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   pipelines: { columns: ["id", "workspace_id", "name", "object_type", "active", "created_at", "updated_at"] },
@@ -258,6 +259,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   visitor_events: { columns: ["id", "workspace_id", "connector_id", "profile_id", "provider", "dedupe_key", "ingest_nonce", "occurred_at", "captured_url", "referrer", "tags", "is_repeat", "is_high_intent", "created_at"] },
   visitor_intent_cases: { columns: ["id", "workspace_id", "company_domain", "company_name", "status", "priority", "owner", "due_at", "evidence_updated_at", "intent_score", "evidence_snapshot", "resolution_note", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   mailbox_connections: { columns: ["id", "workspace_id", "owner_email", "provider", "toolkit", "alias", "auth_config_id", "composio_user_id", "connected_account_id", "status", "provider_status", "allowed_capabilities", "last_synced_at", "last_error", "revision", "change_id", "connect_expires_at", "created_by", "created_at", "updated_at"] },
+  communication_consents: { columns: ["id", "workspace_id", "contact_id", "channel", "status", "basis", "evidence", "captured_at", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  conversation_threads: { columns: ["id", "workspace_id", "contact_id", "channel", "provider", "provider_thread_id", "participant_email", "subject", "status", "last_message_at", "unread_count", "revision", "change_id", "created_at", "updated_at"] },
+  conversation_messages: { columns: ["id", "workspace_id", "thread_id", "direction", "provider", "provider_message_id", "idempotency_key", "from_email", "to_email", "subject", "body_text", "purpose", "status", "error", "sent_by", "occurred_at", "created_at", "updated_at"] },
 };
 const recoveryTables = Object.keys(recoverySpecs) as RecoveryTable[];
 const securityHeaders = {
@@ -1426,6 +1430,34 @@ function safeResendDelivery(row: Record<string, unknown> | null) {
     error: row.error, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
   };
 }
+function safeCommunicationConsent(row: Record<string, unknown> | null) {
+  if (!row) return { channel: "email", status: "unknown", basis: "unknown", evidence: null,
+    captured_at: null, revision: 0, updated_at: null };
+  return {
+    id: row.id, contact_id: row.contact_id, channel: row.channel, status: row.status, basis: row.basis,
+    evidence: row.evidence, captured_at: row.captured_at, revision: row.revision, updated_at: row.updated_at,
+  };
+}
+function safeConversationThread(row: Record<string, unknown>) {
+  return {
+    id: row.id, contact_id: row.contact_id, channel: row.channel, participant_email: row.participant_email,
+    subject: row.subject, status: row.status, last_message_at: row.last_message_at,
+    unread_count: row.unread_count, revision: row.revision, contact_name: row.contact_name || null,
+    consent: safeCommunicationConsent(row.consent_id ? {
+      id: row.consent_id, contact_id: row.contact_id, channel: "email", status: row.consent_status,
+      basis: row.consent_basis, evidence: row.consent_evidence, captured_at: row.consent_captured_at,
+      revision: row.consent_revision, updated_at: row.consent_updated_at,
+    } : null),
+  };
+}
+function safeConversationMessage(row: Record<string, unknown>) {
+  return {
+    id: row.id, thread_id: row.thread_id, direction: row.direction, provider: row.provider,
+    from_email: row.from_email, to_email: row.to_email, subject: row.subject, body_text: row.body_text,
+    purpose: row.purpose, status: row.status, error: row.error, sent_by: row.sent_by,
+    occurred_at: row.occurred_at,
+  };
+}
 function resendErrorPayload(value: unknown, fallback: string) {
   if (!isPlainObject(value)) return fallback;
   const name = typeof value.name === "string" ? value.name.trim() : "";
@@ -1937,6 +1969,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/resend-connection": ["GET", "POST", "DELETE"],
     "/v1/admin/resend-connection/verify": ["POST"],
     "/v1/admin/resend-connection/send": ["POST"],
+    "/v1/admin/conversations": ["GET"],
+    "/v1/admin/conversations/send": ["POST"],
   };
   if (exact[pathname]) return exact[pathname];
   const patterns: Array<[RegExp, string[]]> = [
@@ -1959,6 +1993,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/companies\/[^/]+\/notes$/, ["POST"]],
     [/^\/v1\/admin\/company-notes\/[^/]+$/, ["PATCH", "DELETE"]],
     [/^\/v1\/admin\/contacts\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
+    [/^\/v1\/admin\/contacts\/[^/]+\/communication-consent$/, ["GET", "PUT"]],
+    [/^\/v1\/admin\/conversations\/thread_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/opportunities\/[^/]+\/intelligence$/, ["GET"]],
     [/^\/v1\/admin\/opportunities\/[^/]+$/, ["PATCH", "DELETE"]],
     [/^\/v1\/admin\/tasks\/[^/]+$/, ["PATCH", "DELETE"]],
@@ -1978,6 +2014,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/mailbox-connections\/mbx_[a-f0-9]{32}\/reconnect$/, ["POST"]],
     [/^\/v1\/admin\/mailbox-connections\/mbx_[a-f0-9]{32}\/revoke$/, ["POST"]],
     [/^\/v1\/admin\/mailbox-connections\/mbx_[a-f0-9]{32}\/conversations$/, ["GET"]],
+    [/^\/v1\/admin\/mailbox-connections\/mbx_[a-f0-9]{32}\/sync-conversations$/, ["POST"]],
     [/^\/v1\/admin\/mailbox-connections\/mbx_[a-f0-9]{32}$/, ["POST", "PATCH", "DELETE"]],
     [/^\/v1\/admin\/visitor-profiles\/vpr_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/visitor-profiles\/vpr_[a-f0-9]{32}\/promote$/, ["POST"]],
@@ -2352,6 +2389,15 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     requireReference("visitor_events", row, "connector_id", "visitor_connectors");
     requireReference("visitor_events", row, "profile_id", "visitor_profiles");
   }
+  for (const row of tables.communication_consents) {
+    requireReference("communication_consents", row, "contact_id", "contacts");
+  }
+  for (const row of tables.conversation_threads) {
+    requireReference("conversation_threads", row, "contact_id", "contacts", true);
+  }
+  for (const row of tables.conversation_messages) {
+    requireReference("conversation_messages", row, "thread_id", "conversation_threads");
+  }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
   for (const row of tables.company_redirects) {
@@ -2508,6 +2554,46 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     } catch {
       throw new ApiError(400, "Backup contains invalid core-object custom metadata");
     }
+  }
+  const consentContacts = new Set<string>();
+  for (const row of tables.communication_consents) {
+    const contactId = String(row.contact_id);
+    if (consentContacts.has(contactId) || row.channel !== "email" ||
+      !["unknown", "opted_in", "opted_out"].includes(String(row.status)) ||
+      !["unknown", "express", "contractual", "inbound_request", "manual_suppression"].includes(String(row.basis)) ||
+      !Number.isInteger(row.revision) || Number(row.revision) < 1 ||
+      (row.status === "opted_out" && row.basis !== "manual_suppression") ||
+      (row.status === "opted_in" && !["express", "contractual", "inbound_request"].includes(String(row.basis)))) {
+      throw new ApiError(400, "Backup contains invalid communication consent");
+    }
+    consentContacts.add(contactId);
+  }
+  const messageIdempotency = new Set<string>();
+  const providerReceipts = new Set<string>();
+  for (const row of tables.conversation_threads) {
+    if (row.channel !== "email" || (row.provider !== null && !["gmail", "outlook"].includes(String(row.provider))) ||
+      ((row.provider === null) !== (row.provider_thread_id === null)) || !validEmail(normalizeEmail(row.participant_email)) ||
+      !String(row.subject).trim() || String(row.subject).length > 200 ||
+      !["open", "closed"].includes(String(row.status)) || !Number.isInteger(row.unread_count) ||
+      Number(row.unread_count) < 0 || !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid conversation thread");
+    }
+  }
+  for (const row of tables.conversation_messages) {
+    const idempotencyKey = String(row.idempotency_key);
+    const providerReceipt = row.provider_message_id === null ? "" : `${row.provider}:${row.provider_message_id}`;
+    if (messageIdempotency.has(idempotencyKey) || !/^[A-Za-z0-9._:-]{8,120}$/.test(idempotencyKey) ||
+      !["inbound", "outbound"].includes(String(row.direction)) ||
+      !["gmail", "outlook", "resend"].includes(String(row.provider)) ||
+      !validEmail(normalizeEmail(row.from_email)) || !validEmail(normalizeEmail(row.to_email)) ||
+      !String(row.subject).trim() || String(row.subject).length > 200 || String(row.body_text).length > 10_000 ||
+      !["inbound", "transactional", "marketing"].includes(String(row.purpose)) ||
+      !["received", "pending", "sent", "failed"].includes(String(row.status)) ||
+      (providerReceipt && providerReceipts.has(providerReceipt))) {
+      throw new ApiError(400, "Backup contains an invalid conversation message");
+    }
+    messageIdempotency.add(idempotencyKey);
+    if (providerReceipt) providerReceipts.add(providerReceipt);
   }
   for (const row of tables.pipeline_stages) {
     if (!Number.isInteger(row.position) || !Number.isInteger(row.probability) ||
@@ -5269,6 +5355,251 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     });
   }
 
+  const communicationConsentMatch = url.pathname.match(/^\/v1\/admin\/contacts\/([^/]+)\/communication-consent$/);
+  if (communicationConsentMatch && request.method === "GET") {
+    const contact = await env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, communicationConsentMatch[1]).first();
+    if (!contact) return json({ error: "Contact not found" }, 404);
+    const consent = await env.DB.prepare(`SELECT * FROM communication_consents
+      WHERE workspace_id=? AND contact_id=? AND channel='email'`).bind(workspaceId, communicationConsentMatch[1])
+      .first<Record<string, unknown>>();
+    return json({ consent: safeCommunicationConsent(consent || null) });
+  }
+  if (communicationConsentMatch && request.method === "PUT") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    let body: Json;
+    try { body = await readJson(request); } catch (error) {
+      return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400);
+    }
+    if (Object.keys(body).some((key) => !["status", "basis", "evidence", "captured_at", "if_revision"].includes(key))) {
+      return json({ error: "Consent request contains unsupported fields" }, 400);
+    }
+    const contact = await env.DB.prepare("SELECT id,email FROM contacts WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, communicationConsentMatch[1]).first<{ id: string; email: string }>();
+    if (!contact) return json({ error: "Contact not found" }, 404);
+    const status = optionalString(body.status, "status", 20) || "";
+    const basis = optionalString(body.basis, "basis", 30) || "";
+    const evidence = optionalString(body.evidence, "evidence", 500);
+    const capturedAt = optionalString(body.captured_at, "captured_at", 50);
+    if (!["opted_in", "opted_out"].includes(status)) return json({ error: "status must be opted_in or opted_out" }, 400);
+    const allowedBases = status === "opted_in" ? ["express", "contractual", "inbound_request"] : ["manual_suppression"];
+    if (!allowedBases.includes(basis)) return json({ error: "basis is incompatible with consent status" }, 400);
+    if (!evidence) return json({ error: "evidence is required" }, 400);
+    if (!capturedAt || !Number.isFinite(Date.parse(capturedAt)) || capturedAt > new Date(Date.now() + 60_000).toISOString()) {
+      return json({ error: "captured_at must be a valid non-future timestamp" }, 400);
+    }
+    const before = await env.DB.prepare(`SELECT * FROM communication_consents
+      WHERE workspace_id=? AND contact_id=? AND channel='email'`).bind(workspaceId, contact.id)
+      .first<Record<string, unknown>>();
+    const expectedRevision = before ? Number(body.if_revision) : 0;
+    if (before && (!Number.isInteger(expectedRevision) || expectedRevision !== Number(before.revision))) {
+      return json({ error: "Consent changed since it was loaded", code: "edit_conflict" }, 409);
+    }
+    const consentId = before ? String(before.id) : id("consent");
+    const now = new Date().toISOString();
+    const changeId = id("chg");
+    const revision = before ? Number(before.revision) + 1 : 1;
+    const after = { id: consentId, contact_id: contact.id, channel: "email", status, basis, evidence,
+      captured_at: capturedAt, revision, updated_at: now };
+    const ip = request.headers.get("cf-connecting-ip");
+    const ipHash = ip ? await sha256(ip) : null;
+    const changed = await env.DB.batch([
+      env.DB.prepare(`INSERT INTO communication_consents
+        (id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,'email',?,?,?,?,1,?,?,?,?)
+        ON CONFLICT(workspace_id,contact_id,channel) DO UPDATE SET
+          status=excluded.status,basis=excluded.basis,evidence=excluded.evidence,captured_at=excluded.captured_at,
+          revision=communication_consents.revision+1,change_id=excluded.change_id,updated_at=excluded.updated_at
+        WHERE communication_consents.revision=?`)
+        .bind(consentId, workspaceId, contact.id, status, basis, evidence, capturedAt, changeId,
+          access.email, now, now, expectedRevision),
+      env.DB.prepare(`INSERT INTO audit_log
+        (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
+        SELECT ?,?,'user',?,'communication_consent.updated','communication_consent',?,?,?,?,?,?
+        WHERE changes()>0 AND EXISTS(SELECT 1 FROM communication_consents WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, consentId, before ? JSON.stringify(safeCommunicationConsent(before)) : null,
+          JSON.stringify(after), requestId(request), ipHash, now, workspaceId, consentId, changeId),
+    ]);
+    if (!changed[0].meta.changes || !changed[1].meta.changes) {
+      return json({ error: "Consent changed before it could be saved", code: "edit_conflict" }, 409);
+    }
+    return json({ consent: after }, before ? 200 : 201);
+  }
+
+  if (url.pathname === "/v1/admin/conversations" && request.method === "GET") {
+    const requestedLimit = Number(url.searchParams.get("limit") || 50);
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) {
+      return json({ error: "limit must be an integer from 1 to 100" }, 400);
+    }
+    const limit = requestedLimit;
+    const threads = await env.DB.prepare(`SELECT t.*,
+      TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
+      cc.id consent_id,cc.status consent_status,cc.basis consent_basis,cc.evidence consent_evidence,
+      cc.captured_at consent_captured_at,cc.revision consent_revision,cc.updated_at consent_updated_at
+      FROM conversation_threads t
+      LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
+      LEFT JOIN communication_consents cc ON cc.workspace_id=t.workspace_id AND cc.contact_id=t.contact_id AND cc.channel='email'
+      WHERE t.workspace_id=? ORDER BY t.last_message_at DESC,t.id DESC LIMIT ?`)
+      .bind(workspaceId, limit).all<Record<string, unknown>>();
+    return json({ threads: threads.results.map(safeConversationThread), truncated: threads.results.length === limit,
+      limits: { threads: 100, messages_per_thread: 100, body_characters: 10_000 } });
+  }
+
+  const conversationThreadMatch = url.pathname.match(/^\/v1\/admin\/conversations\/(thread_[a-f0-9]{32})$/);
+  if (conversationThreadMatch && request.method === "GET") {
+    const thread = await env.DB.prepare(`SELECT t.*,
+      TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
+      cc.id consent_id,cc.status consent_status,cc.basis consent_basis,cc.evidence consent_evidence,
+      cc.captured_at consent_captured_at,cc.revision consent_revision,cc.updated_at consent_updated_at
+      FROM conversation_threads t
+      LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
+      LEFT JOIN communication_consents cc ON cc.workspace_id=t.workspace_id AND cc.contact_id=t.contact_id AND cc.channel='email'
+      WHERE t.workspace_id=? AND t.id=?`).bind(workspaceId, conversationThreadMatch[1])
+      .first<Record<string, unknown>>();
+    if (!thread) return json({ error: "Conversation not found" }, 404);
+    const messages = await env.DB.prepare(`SELECT * FROM conversation_messages
+      WHERE workspace_id=? AND thread_id=? ORDER BY occurred_at ASC,id ASC LIMIT 100`)
+      .bind(workspaceId, conversationThreadMatch[1]).all<Record<string, unknown>>();
+    return json({ thread: safeConversationThread(thread), messages: messages.results.map(safeConversationMessage),
+      truncated: messages.results.length === 100 });
+  }
+
+  if (conversationThreadMatch && request.method === "PATCH") {
+    let body: Json;
+    try { body = await readJson(request); } catch (error) {
+      return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400);
+    }
+    if (Object.keys(body).some((key) => !["status", "mark_read", "if_revision"].includes(key))) {
+      return json({ error: "Conversation update contains unsupported fields" }, 400);
+    }
+    const before = await env.DB.prepare("SELECT * FROM conversation_threads WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, conversationThreadMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Conversation not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Conversation changed since it was loaded", code: "edit_conflict" }, 409);
+    const status = body.status === undefined ? String(before.status) : optionalString(body.status, "status", 10) || "";
+    if (!["open", "closed"].includes(status)) return json({ error: "status must be open or closed" }, 400);
+    if (body.mark_read !== undefined && body.mark_read !== true) return json({ error: "mark_read must be true" }, 400);
+    const unreadCount = body.mark_read === true ? 0 : Number(before.unread_count);
+    const now = new Date(Math.max(Date.now(), Date.parse(String(before.updated_at)) + 1)).toISOString();
+    const changeId = id("chg");
+    const after = { ...before, status, unread_count: unreadCount, revision: Number(before.revision) + 1,
+      change_id: changeId, updated_at: now };
+    const ip = request.headers.get("cf-connecting-ip");
+    const changed = await env.DB.batch([
+      env.DB.prepare(`UPDATE conversation_threads SET status=?,unread_count=?,revision=revision+1,change_id=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND revision=?`)
+        .bind(status, unreadCount, changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log
+        (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
+        SELECT ?,?,'user',?,'conversation.updated','conversation_thread',?,?,?,?,?,?
+        WHERE changes()>0 AND EXISTS(SELECT 1 FROM conversation_threads WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(before), JSON.stringify(after),
+          requestId(request), ip ? await sha256(ip) : null, now, workspaceId, before.id, changeId),
+    ]);
+    if (!changed[0].meta.changes) return json({ error: "Conversation changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM conversation_threads WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ thread: safeConversationThread(updated!) });
+  }
+
+  if (url.pathname === "/v1/admin/conversations/send" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    let body: Json;
+    try { body = await readJson(request); } catch (error) {
+      return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400);
+    }
+    if (Object.keys(body).some((key) => !["contact_id", "thread_id", "subject", "text", "purpose", "idempotency_key", "confirmation"].includes(key))) {
+      return json({ error: "Conversation send contains unsupported fields" }, 400);
+    }
+    const contactId = optionalString(body.contact_id, "contact_id", 80) || "";
+    const threadIdInput = optionalString(body.thread_id, "thread_id", 80);
+    const subject = optionalString(body.subject, "subject", 200) || "";
+    const text = optionalString(body.text, "text", 10_000) || "";
+    const purpose = optionalString(body.purpose, "purpose", 20) || "";
+    const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!contactId || !subject || !text) return json({ error: "contact_id, subject, and text are required" }, 400);
+    if (!["transactional", "marketing"].includes(purpose)) return json({ error: "purpose must be transactional or marketing" }, 400);
+    if (!/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) return json({ error: "idempotency_key is invalid" }, 400);
+    if (body.confirmation !== "SEND EMAIL") return json({ error: "Explicit send confirmation is required" }, 400);
+    if (threadIdInput && !/^thread_[a-f0-9]{32}$/.test(threadIdInput)) return json({ error: "thread_id is invalid" }, 400);
+    const contact = await env.DB.prepare("SELECT id,email FROM contacts WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, contactId).first<{ id: string; email: string }>();
+    if (!contact || !validEmail(normalizeEmail(contact.email))) return json({ error: "Contact with a valid email was not found" }, 404);
+    const consent = await env.DB.prepare(`SELECT * FROM communication_consents
+      WHERE workspace_id=? AND contact_id=? AND channel='email'`).bind(workspaceId, contact.id)
+      .first<Record<string, unknown>>();
+    const consentAllows = consent && consent.status === "opted_in" && (purpose !== "marketing" || consent.basis === "express");
+    if (!consentAllows) return json({ error: purpose === "marketing"
+      ? "Marketing email requires current express opt-in evidence"
+      : "Transactional email requires current recorded permission", code: "email_consent_required" }, 409);
+    const existingMessage = await env.DB.prepare(`SELECT * FROM conversation_messages
+      WHERE workspace_id=? AND idempotency_key=?`).bind(workspaceId, idempotencyKey).first<Record<string, unknown>>();
+    if (existingMessage) {
+      if (existingMessage.to_email !== normalizeEmail(contact.email) || existingMessage.subject !== subject ||
+        existingMessage.body_text !== text || existingMessage.purpose !== purpose) {
+        return json({ error: "Idempotency key was already used for a different conversation message" }, 409);
+      }
+      return json({ ok: existingMessage.status === "sent", replayed: true, message: safeConversationMessage(existingMessage) },
+        existingMessage.status === "sent" ? 200 : 409);
+    }
+    const connection = await env.DB.prepare(`SELECT * FROM resend_connections
+      WHERE workspace_id=? AND status='active' LIMIT 1`).bind(workspaceId).first<Record<string, unknown>>();
+    if (!connection) return json({ error: "A verified Resend connection is required" }, 409);
+    let thread: Record<string, unknown> | null = null;
+    if (threadIdInput) {
+      thread = await env.DB.prepare(`SELECT * FROM conversation_threads
+        WHERE workspace_id=? AND id=? AND contact_id=? AND status='open'`).bind(workspaceId, threadIdInput, contact.id)
+        .first<Record<string, unknown>>();
+      if (!thread) return json({ error: "Open conversation was not found for this contact" }, 404);
+    }
+    const now = new Date().toISOString();
+    const threadId = thread ? String(thread.id) : id("thread");
+    const messageId = id("msg");
+    try {
+      const statements = [];
+      if (!thread) statements.push(env.DB.prepare(`INSERT INTO conversation_threads
+        (id,workspace_id,contact_id,channel,participant_email,subject,status,last_message_at,unread_count,revision,change_id,created_at,updated_at)
+        VALUES(?,?,?,'email',?,?,'open',?,0,1,?,?,?)`)
+        .bind(threadId, workspaceId, contact.id, normalizeEmail(contact.email), subject, now, id("chg"), now, now));
+      else statements.push(env.DB.prepare(`UPDATE conversation_threads SET last_message_at=?,revision=revision+1,change_id=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND status='open'`).bind(now, id("chg"), now, workspaceId, threadId));
+      statements.push(env.DB.prepare(`INSERT INTO conversation_messages
+        (id,workspace_id,thread_id,direction,provider,provider_message_id,idempotency_key,from_email,to_email,subject,
+         body_text,purpose,status,error,sent_by,occurred_at,created_at,updated_at)
+        VALUES(?,?,?,'outbound','resend',NULL,?,?,?,?,?,?,'pending',NULL,?,?,?,?)`)
+        .bind(messageId, workspaceId, threadId, idempotencyKey, String(connection.from_email), normalizeEmail(contact.email),
+          subject, text, purpose, access.email, now, now, now));
+      statements.push(await auditStatement(env, access, request, "conversation.message_queued", "conversation_message", messageId, null,
+        { thread_id: threadId, contact_id: contact.id, recipient: normalizeEmail(contact.email), subject, purpose }));
+      await env.DB.batch(statements);
+    } catch {
+      const raced = await env.DB.prepare(`SELECT * FROM conversation_messages WHERE workspace_id=? AND idempotency_key=?`)
+        .bind(workspaceId, idempotencyKey).first<Record<string, unknown>>();
+      if (raced) return json({ error: "Conversation message is already processing", code: "message_processing" }, 409);
+      return json({ error: "Conversation message could not be queued" }, 500);
+    }
+    const deliveryResponse = await executeResendDelivery(env, access, request, connection, {
+      recipient: normalizeEmail(contact.email), subject, text, idempotencyKey: `conversation:${idempotencyKey}`,
+    });
+    const deliveryBody = await deliveryResponse.clone().json() as Json;
+    const delivery = isPlainObject(deliveryBody.delivery) ? deliveryBody.delivery : null;
+    const finalStatus = deliveryResponse.ok ? "sent" : "failed";
+    const finalError = deliveryResponse.ok ? null : optionalString(deliveryBody.error, "error", 240) || "Email delivery failed";
+    const finishedAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE conversation_messages SET provider_message_id=?,status=?,error=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND status='pending'`)
+        .bind(delivery?.provider_email_id || null, finalStatus, finalError, finishedAt, workspaceId, messageId),
+      await auditStatement(env, access, request, deliveryResponse.ok ? "conversation.message_sent" : "conversation.message_failed",
+        "conversation_message", messageId, null, { thread_id: threadId, status: finalStatus, error: finalError }),
+    ]);
+    const completedMessage = await env.DB.prepare("SELECT * FROM conversation_messages WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, messageId).first<Record<string, unknown>>();
+    if (!deliveryResponse.ok) return json({ error: finalError, code: "conversation_delivery_failed",
+      message: safeConversationMessage(completedMessage!) }, deliveryResponse.status);
+    return json({ ok: true, replayed: false, thread_id: threadId, message: safeConversationMessage(completedMessage!) }, 201);
+  }
+
   if (url.pathname === "/v1/admin/resend-connection" && request.method === "GET") {
     const connection = await env.DB.prepare(`SELECT * FROM resend_connections
       WHERE workspace_id=? AND status<>'revoked' ORDER BY created_at DESC LIMIT 1`)
@@ -6710,6 +7041,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM agent_runs WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM tasks WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM mailbox_connections WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM conversation_messages WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM visitor_intent_cases WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM visitor_events WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM audience_import_members WHERE workspace_id=?").bind(workspaceId),
@@ -6825,6 +7159,105 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       const failure = mailboxProviderFailure(error);
       return json({ error: failure.message, code: failure.code }, 502);
     }
+  }
+
+  const mailboxConversationSyncMatch = url.pathname.match(
+    /^\/v1\/admin\/mailbox-connections\/(mbx_[a-f0-9]{32})\/sync-conversations$/,
+  );
+  if (mailboxConversationSyncMatch && request.method === "POST") {
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["limit", "confirmation"].includes(key))) {
+      return json({ error: "Mailbox sync contains unsupported fields" }, 400);
+    }
+    if (body.confirmation !== "SYNC EMAIL METADATA") return json({ error: "Explicit sync confirmation is required" }, 400);
+    const limitValue = body.limit === undefined ? 10 : Number(body.limit);
+    if (!Number.isInteger(limitValue) || limitValue < 1 || limitValue > 25) {
+      return json({ error: "limit must be a whole number from 1 to 25" }, 400);
+    }
+    const connection = await env.DB.prepare(`SELECT id,owner_email,provider,connected_account_id,status
+      FROM mailbox_connections WHERE workspace_id=? AND id=? AND (?=1 OR owner_email=?)`)
+      .bind(workspaceId, mailboxConversationSyncMatch[1], isWorkspaceAdmin(access) ? 1 : 0, normalizeEmail(access.email))
+      .first<Record<string, unknown>>();
+    if (!connection) return json({ error: "Mailbox connection not found" }, 404);
+    if (connection.status !== "active" || !connection.connected_account_id) {
+      return json({ error: "Only an active mailbox can sync conversations", code: "mailbox_not_active" }, 409);
+    }
+    let providerConversations: MailboxConversation[];
+    try {
+      providerConversations = await fetchMailboxConversations(env, connection.provider as MailboxProvider,
+        String(connection.connected_account_id), limitValue);
+    } catch (error) {
+      const failure = mailboxProviderFailure(error);
+      return json({ error: failure.message, code: failure.code }, 502);
+    }
+    let imported = 0;
+    let repeated = 0;
+    let skipped = 0;
+    for (const conversation of providerConversations) {
+      const senderEmail = normalizeEmail(conversation.sender_email);
+      const occurredAt = conversation.received_at && Number.isFinite(Date.parse(conversation.received_at))
+        ? conversation.received_at : null;
+      if (!validEmail(senderEmail) || !occurredAt) { skipped += 1; continue; }
+      const receipt = `${connection.id}:${conversation.id}:${occurredAt}`;
+      const providerMessageId = (await sha256(receipt)).slice(0, 64);
+      const existing = await env.DB.prepare(`SELECT id FROM conversation_messages
+        WHERE workspace_id=? AND provider=? AND provider_message_id=?`)
+        .bind(workspaceId, connection.provider, providerMessageId).first();
+      if (existing) { repeated += 1; continue; }
+      const contact = await env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND email=?")
+        .bind(workspaceId, senderEmail).first<{ id: string }>();
+      const subject = (conversation.subject || "(no subject)").trim().slice(0, 200) || "(no subject)";
+      const providerThreadId = `${connection.id}:${conversation.id}`;
+      const thread = await env.DB.prepare(`SELECT * FROM conversation_threads WHERE workspace_id=? AND channel='email'
+        AND provider=? AND provider_thread_id=? LIMIT 1`)
+        .bind(workspaceId, connection.provider, providerThreadId).first<Record<string, unknown>>();
+      const now = new Date().toISOString();
+      const threadId = thread ? String(thread.id) : id("thread");
+      const messageId = id("msg");
+      const changeId = id("chg");
+      const idempotencyKey = `mailbox:${providerMessageId}`;
+      const statements = [];
+      if (!thread) {
+        statements.push(env.DB.prepare(`INSERT INTO conversation_threads
+          (id,workspace_id,contact_id,channel,provider,provider_thread_id,participant_email,subject,status,last_message_at,unread_count,revision,change_id,created_at,updated_at)
+          VALUES(?,?,?,'email',?,?,?,?,'open',?,1,1,?,?,?)`)
+          .bind(threadId, workspaceId, contact?.id || null, connection.provider, providerThreadId,
+            senderEmail, subject, occurredAt, changeId, now, now));
+      } else {
+        statements.push(env.DB.prepare(`UPDATE conversation_threads SET contact_id=COALESCE(contact_id,?),status='open',
+          last_message_at=CASE WHEN last_message_at<? THEN ? ELSE last_message_at END,unread_count=unread_count+1,
+          revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=?`)
+          .bind(contact?.id || null, occurredAt, occurredAt, changeId, now, workspaceId, threadId));
+      }
+      statements.push(env.DB.prepare(`INSERT INTO conversation_messages
+        (id,workspace_id,thread_id,direction,provider,provider_message_id,idempotency_key,from_email,to_email,subject,
+         body_text,purpose,status,error,sent_by,occurred_at,created_at,updated_at)
+        VALUES(?,?,?,'inbound',?,?,?,?,?,?,?,'inbound','received',NULL,NULL,?,?,?)`)
+        .bind(messageId, workspaceId, threadId, connection.provider, providerMessageId, idempotencyKey,
+          senderEmail, normalizeEmail(connection.owner_email), subject, String(conversation.snippet || "").slice(0, 1000),
+          occurredAt, now, now));
+      if (contact) statements.push(env.DB.prepare(`INSERT INTO communication_consents
+        (id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,'email','opted_in','inbound_request',?,?,1,?,?,?,?)
+        ON CONFLICT(workspace_id,contact_id,channel) DO UPDATE SET
+          status='opted_in',basis='inbound_request',evidence=excluded.evidence,captured_at=excluded.captured_at,
+          revision=communication_consents.revision+1,change_id=excluded.change_id,updated_at=excluded.updated_at
+        WHERE communication_consents.status='unknown'`)
+        .bind(id("consent"), workspaceId, contact.id, `Inbound email received by ${connection.owner_email}`,
+          occurredAt, id("chg"), access.email, now, now));
+      statements.push(await auditStatement(env, access, request, "conversation.message_received", "conversation_message",
+        messageId, null, { thread_id: threadId, contact_id: contact?.id || null, provider: connection.provider,
+          sender_email: senderEmail, subject }));
+      try { await env.DB.batch(statements); imported += 1; }
+      catch {
+        const raced = await env.DB.prepare(`SELECT id FROM conversation_messages
+          WHERE workspace_id=? AND provider=? AND provider_message_id=?`)
+          .bind(workspaceId, connection.provider, providerMessageId).first();
+        if (raced) repeated += 1; else throw new ApiError(500, "Conversation sync failed and was rolled back");
+      }
+    }
+    return json({ ok: true, imported, repeated, skipped, received: providerConversations.length,
+      privacy: { persisted: true, body_source: "provider snippet only", attachments_persisted: false } });
   }
 
   if (url.pathname === "/v1/admin/mailbox-connections" && request.method === "POST") {

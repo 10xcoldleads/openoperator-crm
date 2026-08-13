@@ -52,6 +52,8 @@ test("server-renders the OpenOperator CRM shell", async () => {
   assert.match(styles, /\.sales-execution,\.companies-panel \{[\s\S]*backdrop-filter:blur\(22px\) saturate\(118%\)/);
   assert.match(styles, /\.bulk-panel \{[\s\S]*linear-gradient\(150deg,#24272e,#17191e 76%\)/);
   assert.match(styles, /@media \(max-width:680px\) \{[\s\S]*\.sidebar \{[\s\S]*position:fixed;[\s\S]*inset:auto 10px 10px/);
+  assert.match(styles, /grid-template-columns:repeat\(3,max-content\)/);
+  assert.match(styles, /\.sidebar nav \.nav-group button \{ flex:0 0 48px; width:48px; min-width:48px; \}/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{ \*,\*::before,\*::after/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
