@@ -3253,10 +3253,30 @@ async function opportunityUpdateAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'opportunity.updated','opportunity',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM opportunities WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    WHERE changes()>0 AND EXISTS(SELECT 1 FROM opportunities WHERE workspace_id=? AND id=? AND updated_at=?)`)
     .bind(id("audit"), access.workspaceId, access.email, opportunityId,
       JSON.stringify(before), JSON.stringify(after), requestId(request), ipHash, expectedUpdatedAt,
       access.workspaceId, opportunityId, expectedUpdatedAt);
+}
+
+async function contactUpdateAuditStatement(
+  env: FrameworkEnv,
+  access: WorkspaceAccess,
+  request: Request,
+  contactId: string,
+  before: unknown,
+  after: unknown,
+  expectedUpdatedAt: string,
+) {
+  const ip = request.headers.get("cf-connecting-ip");
+  const ipHash = ip ? await sha256(ip) : null;
+  return env.DB.prepare(`INSERT INTO audit_log
+    (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
+    SELECT ?,?,'user',?,'contact.updated','contact',?,?,?,?,?,?
+    WHERE changes()>0 AND EXISTS(SELECT 1 FROM contacts WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    .bind(id("audit"), access.workspaceId, access.email, contactId,
+      JSON.stringify(before), JSON.stringify(after), requestId(request), ipHash, new Date().toISOString(),
+      access.workspaceId, contactId, expectedUpdatedAt);
 }
 
 async function taskMutationAuditStatement(
@@ -3274,10 +3294,10 @@ async function taskMutationAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,?,'task',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM tasks WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    WHERE (?=0 OR changes()>0) AND EXISTS(SELECT 1 FROM tasks WHERE workspace_id=? AND id=? AND updated_at=?)`)
     .bind(id("audit"), access.workspaceId, access.email, action, taskId,
       before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after),
-      requestId(request), ipHash, new Date().toISOString(),
+      requestId(request), ipHash, new Date().toISOString(), action === "task.updated" ? 1 : 0,
       access.workspaceId, taskId, expectedUpdatedAt);
 }
 
@@ -3296,10 +3316,10 @@ async function automationMutationAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,?,'automation',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM automation_rules WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    WHERE (?=0 OR changes()>0) AND EXISTS(SELECT 1 FROM automation_rules WHERE workspace_id=? AND id=? AND updated_at=?)`)
     .bind(id("audit"), access.workspaceId, access.email, action, automationId,
       before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after),
-      requestId(request), ipHash, new Date().toISOString(),
+      requestId(request), ipHash, new Date().toISOString(), action === "automation.deleted" ? 0 : 1,
       access.workspaceId, automationId, expectedUpdatedAt);
 }
 
@@ -3338,7 +3358,7 @@ async function agentWorkItemRequeueAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'agent.work_item_requeued','agent_work_item',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM agent_work_items
+    WHERE changes()>0 AND EXISTS(SELECT 1 FROM agent_work_items
       WHERE workspace_id=? AND id=? AND updated_at=?
         AND (status='failed' OR (status='claimed' AND claim_expires_at<=?)))`)
     .bind(id("audit"), access.workspaceId, access.email, workItemId, JSON.stringify(before), JSON.stringify(after),
@@ -3380,10 +3400,10 @@ async function sourceMutationAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,?,'source',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM sources WHERE workspace_id=? AND id=? AND active=?)`)
+    WHERE (?=0 OR changes()>0) AND EXISTS(SELECT 1 FROM sources WHERE workspace_id=? AND id=? AND active=?)`)
     .bind(id("audit"), access.workspaceId, access.email, action, sourceId,
       before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after),
-      requestId(request), ipHash, new Date().toISOString(),
+      requestId(request), ipHash, new Date().toISOString(), action === "source.revoked" ? 1 : 0,
       access.workspaceId, sourceId, expectedActive);
 }
 
@@ -8440,17 +8460,6 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid custom fields" }, 400); }
     }
     const updatedAt = new Date(Math.max(Date.now(), Date.parse(String(before.updated_at)) + 1)).toISOString();
-    const result = await env.DB.prepare(`UPDATE contacts SET
-      stage=COALESCE(?,stage),status=COALESCE(?,status),
-      owner=CASE WHEN ?=1 THEN ? ELSE owner END,
-      next_follow_up_at=CASE WHEN ?=1 THEN ? ELSE next_follow_up_at END,
-      custom_fields=CASE WHEN ?=1 THEN ? ELSE custom_fields END,
-      updated_at=? WHERE workspace_id=? AND id=? AND (? IS NULL OR updated_at=?)`)
-      .bind(stage, status, body.owner === undefined ? 0 : 1, owner,
-        body.next_follow_up_at === undefined ? 0 : 1, followUp,
-        body.custom_fields === undefined ? 0 : 1, nextCustomFields, updatedAt,
-        workspaceId, contactMatch[1], expectedUpdatedAt, expectedUpdatedAt).run();
-    if (!result.meta.changes) return json({ error: "Contact changed since it was loaded", code: "edit_conflict" }, 409);
     const after = {
       ...before, stage: stage || before.stage, status: status || before.status,
       owner: body.owner === undefined ? before.owner : owner,
@@ -8458,7 +8467,21 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       custom_fields: body.custom_fields === undefined ? before.custom_fields : nextCustomFields,
       updated_at: updatedAt,
     };
-    await audit(env, access, request, "contact.updated", "contact", contactMatch[1], before, after);
+    const originalUpdatedAt = expectedUpdatedAt || String(before.updated_at);
+    const result = await env.DB.batch([
+      env.DB.prepare(`UPDATE contacts SET
+        stage=COALESCE(?,stage),status=COALESCE(?,status),
+        owner=CASE WHEN ?=1 THEN ? ELSE owner END,
+        next_follow_up_at=CASE WHEN ?=1 THEN ? ELSE next_follow_up_at END,
+        custom_fields=CASE WHEN ?=1 THEN ? ELSE custom_fields END,
+        updated_at=? WHERE workspace_id=? AND id=? AND updated_at=?`)
+        .bind(stage, status, body.owner === undefined ? 0 : 1, owner,
+          body.next_follow_up_at === undefined ? 0 : 1, followUp,
+          body.custom_fields === undefined ? 0 : 1, nextCustomFields, updatedAt,
+          workspaceId, contactMatch[1], originalUpdatedAt),
+      await contactUpdateAuditStatement(env, access, request, contactMatch[1], before, after, updatedAt),
+    ]);
+    if (!result[0].meta.changes) return json({ error: "Contact changed since it was loaded", code: "edit_conflict" }, 409);
     if ((stage && stage !== before.stage) || (status && status !== before.status)) {
       await runContactAutomations(env, access, after, requestId(request), "contact.lifecycle_changed");
     }
@@ -9315,15 +9338,15 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const after = { ...before, status: "queued", claimed_by_credential_id: null, claim_expires_at: null,
       result: null, completed_at: null, updated_at: updatedAt };
     const requeued = await env.DB.batch([
-      await agentWorkItemRequeueAuditStatement(env, access, request,
-        agentWorkItemRequeueMatch[1], before, after, expectedUpdatedAt, requeueAt),
       env.DB.prepare(`UPDATE agent_work_items
         SET status='queued',claimed_by_credential_id=NULL,claim_expires_at=NULL,result=NULL,completed_at=NULL,updated_at=?
         WHERE workspace_id=? AND id=? AND updated_at=?
           AND (status='failed' OR (status='claimed' AND claim_expires_at<=?))`)
         .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, requeueAt),
+      await agentWorkItemRequeueAuditStatement(env, access, request,
+        agentWorkItemRequeueMatch[1], before, after, updatedAt, requeueAt),
     ]);
-    if (!requeued[1].meta.changes) {
+    if (!requeued[0].meta.changes) {
       return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
     }
     return json({ ok: true, work_item: after });
@@ -12043,10 +12066,10 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const source = await env.DB.prepare("SELECT id,slug,name,active FROM sources WHERE workspace_id=? AND id=?").bind(workspaceId, sourceMatch[1]).first<Record<string, unknown>>();
     if (!source) return json({ error: "Source not found" }, 404);
     const result = await env.DB.batch([
-      await sourceMutationAuditStatement(env, access, request, "source.revoked", sourceMatch[1], source, { ...source, active: 0 }, 1),
       env.DB.prepare("UPDATE sources SET active=0 WHERE workspace_id=? AND id=? AND active=1").bind(workspaceId, sourceMatch[1]),
+      await sourceMutationAuditStatement(env, access, request, "source.revoked", sourceMatch[1], source, { ...source, active: 0 }, 0),
     ]);
-    if (!result[1].meta.changes) return json({ error: "Source was already revoked" }, 409);
+    if (!result[0].meta.changes) return json({ error: "Source was already revoked" }, 409);
     return json({ ok: true });
   }
   return json({ error: "Not found" }, 404);
