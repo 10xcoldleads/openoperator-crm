@@ -759,6 +759,73 @@ describe("authorization and transport security", () => {
     expect(ledger.appointments).toHaveLength(1);
   });
 
+  it("reports bounded first-party cohorts without overstating conversion or mixing currencies", async () => {
+    expect((await call("/v1/admin/reports/revenue-funnel")).status).toBe(401);
+    expect((await call("/v1/admin/reports/revenue-funnel?preset=365", { headers: adminHeaders })).status).toBe(400);
+    expect((await call("/v1/admin/reports/revenue-funnel?start=2025-01-01", { headers: adminHeaders })).status).toBe(400);
+    expect((await call("/v1/admin/reports/revenue-funnel?start=2026-02-29&end=2026-03-01", { headers: adminHeaders })).status).toBe(400);
+    expect((await call("/v1/admin/reports/revenue-funnel?start=2024-01-01&end=2026-01-02", { headers: adminHeaders })).status).toBe(400);
+    const createdAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const old = new Date(Date.now() - 120 * 86_400_000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,status,stage,score,tags,custom_fields,source_first,source_last,created_at,updated_at)
+        VALUES('con_report_a','ws_openoperator','report-a@example.com','customer','won',0,'[]','{}','book','book',?,?)`).bind(createdAt, createdAt),
+      env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,status,stage,score,tags,custom_fields,source_first,source_last,created_at,updated_at)
+        VALUES('con_report_b','ws_openoperator','report-b@example.com','lead','new',0,'[]','{}','organic','organic',?,?)`).bind(createdAt, createdAt),
+      env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,status,stage,score,tags,custom_fields,source_first,source_last,created_at,updated_at)
+        VALUES('con_report_old','ws_openoperator','report-old@example.com','customer','won',0,'[]','{}','old','old',?,?)`).bind(old, old),
+      env.DB.prepare(`INSERT INTO opportunities(id,workspace_id,pipeline_id,stage_id,contact_id,name,status,value,currency,probability,created_at,updated_at)
+        VALUES('opp_report_usd','ws_openoperator','pipe_openoperator_sales','stage_won','con_report_a','USD win','won',1200,'USD',100,?,?)`).bind(createdAt, createdAt),
+      env.DB.prepare(`INSERT INTO opportunities(id,workspace_id,pipeline_id,stage_id,contact_id,name,status,value,currency,probability,created_at,updated_at)
+        VALUES('opp_report_eur','ws_openoperator','pipe_openoperator_sales','stage_new','con_report_b','EUR open','open',900,'EUR',10,?,?)`).bind(createdAt, createdAt),
+      env.DB.prepare(`INSERT INTO opportunities(id,workspace_id,pipeline_id,stage_id,contact_id,name,status,value,currency,probability,created_at,updated_at)
+        VALUES('opp_report_old','ws_openoperator','pipe_openoperator_sales','stage_won','con_report_old','Old win','won',9999,'USD',100,?,?)`).bind(old, old),
+    ]);
+    const response = await call("/v1/admin/reports/revenue-funnel?preset=30", { headers: adminHeaders });
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      summary: Record<string, number>; values_by_currency: Array<Record<string, unknown>>;
+      daily: Array<Record<string, unknown>>; lifecycle_distribution: Array<Record<string, unknown>>;
+      source_first_touch: { rows: Array<Record<string, unknown>> };
+      pipeline_stage_snapshot: Array<Record<string, unknown>>; methodology: Record<string, string>;
+    };
+    expect(body.summary).toMatchObject({ new_contacts: 2, current_customers: 1, opportunities: 2, current_won: 1, current_lost: 0 });
+    expect(body.values_by_currency).toEqual([
+      expect.objectContaining({ currency: "EUR", open_value: 900, current_won_value: 0 }),
+      expect.objectContaining({ currency: "USD", open_value: 0, current_won_value: 1200 }),
+    ]);
+    expect(body.daily).toEqual([expect.objectContaining({ contacts: 2, current_customers: 1, opportunities: 2, current_won: 1 })]);
+    expect(body.lifecycle_distribution).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "new", contacts: 1 }), expect.objectContaining({ stage: "won", contacts: 1 }),
+    ]));
+    expect(body.source_first_touch.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "book", contacts: 1, current_customers: 1, won_contacts: 1 }),
+      expect.objectContaining({ source: "organic", contacts: 1, current_customers: 0, won_contacts: 0 }),
+    ]));
+    expect(body.pipeline_stage_snapshot.find((row) => row.stage_id === "stage_won")).toMatchObject({ opportunities: 1 });
+    expect(body.methodology.conversion).toContain("not historical");
+    expect(body.methodology.attribution).toContain("not be interpreted as causal");
+    expect(body.methodology.currency).toContain("not FX-normalized");
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_report_reader','ws_openoperator','report-reader@example.com','member',1,?)`).bind(createdAt).run();
+    expect((await call("/v1/admin/access-policy", { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      expected_revision: 1, member_contact_grants: [], member_opportunity_grants: [],
+    }) })).status).toBe(200);
+    const restricted = await call("/v1/admin/reports/revenue-funnel?preset=30", {
+      headers: { "oai-authenticated-user-email": "report-reader@example.com" },
+    });
+    expect(restricted.status).toBe(200);
+    const restrictedBody = await restricted.json() as {
+      permissions: { opportunities: boolean }; values_by_currency: unknown; pipeline_stage_snapshot: unknown;
+      summary: Record<string, unknown>; source_first_touch: { rows: Array<Record<string, unknown>> };
+    };
+    expect(restrictedBody.permissions.opportunities).toBe(false);
+    expect(restrictedBody.values_by_currency).toBeNull();
+    expect(restrictedBody.pipeline_stage_snapshot).toBeNull();
+    expect(restrictedBody.summary).not.toHaveProperty("opportunities");
+    expect(restrictedBody.source_first_touch.rows[0]).not.toHaveProperty("won_contacts");
+  });
+
   it("governs typed contact fields as workspace metadata without discarding archived values", async () => {
     expect((await call("/v1/admin/custom-fields")).status).toBe(401);
     const createdResponse = await call("/v1/admin/custom-fields", {
@@ -1172,6 +1239,12 @@ describe("authorization and transport security", () => {
       [`/v1/admin/forms/form_${"a".repeat(32)}/publish`, "POST"],
       [`/v1/admin/forms/form_${"a".repeat(32)}/revoke`, "POST"],
       [`/v1/admin/forms/form_${"a".repeat(32)}/submissions`, "GET"],
+      ["/v1/admin/booking-calendars", "GET, POST"],
+      [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}`, "GET, PATCH"],
+      [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}/publish`, "POST"],
+      [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}/revoke`, "POST"],
+      [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}/appointments`, "GET"],
+      ["/v1/admin/reports/revenue-funnel", "GET"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}/merge-preview`, "POST"],

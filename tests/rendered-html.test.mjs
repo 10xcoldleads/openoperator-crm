@@ -104,6 +104,22 @@ test("ships a functional responsive local-first booking surface", async () => {
   assert.match(migration, /booking_appointments_manage_token_unique/);
 });
 
+test("ships a truthful responsive first-party reporting surface", async () => {
+  const [dashboard, workspace, styles] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ReportingWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "reports", label: "Reports"/);
+  assert.match(dashboard, /<ReportingWorkspace active=\{activeView === "reports"\}/);
+  assert.match(workspace, /NOT CAUSAL ATTRIBUTION/);
+  assert.match(workspace, /NOT HISTORICAL CONVERSION/);
+  assert.match(workspace, /values_by_currency/);
+  assert.match(workspace, /preset=\$\{value\}/);
+  assert.match(styles, /\.report-workspace\{/);
+  assert.match(styles, /@media\(max-width:620px\)\{\.report-workspace/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);

@@ -19,7 +19,7 @@ This matrix is the release contract for the open-source HighLevel-style workspac
 | Payments | No provider connection, ledger, refund, or reconciliation model | Omitted | Add only after a provider-neutral ledger and Stripe adapter are tested |
 | Marketing and social | No publish scheduler, provider authorization, or post lifecycle | Omitted | Research and implement as a separate bounded module |
 | Reputation | No review-provider adapter or reply governance | Omitted | Add only with provider evidence and human approval for replies |
-| Reporting | Operational summaries exist; ad/call/attribution reporting is incomplete | Dashboard only | Add report modules individually when their source data is real |
+| Reporting | Bounded 7/30/90-day first-party cohorts, daily arrivals, contact lifecycle distribution, directional first-touch grouping, permission-aware pipeline snapshots, currency-separated values, responsive browser proof, and explicit methodology limits | Visible | Historical conversion requires a dedicated immutable stage-transition event model; ads/calls remain omitted until authoritative sources exist |
 
 ## Proof rules
 

@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, and secure Forms milestones to `main` on 2026-08-13; current main before the Booking branch is `168decc` through PR #8.
+Merged foundation, Conversations, secure Forms, and local-first Booking milestones to `main` on 2026-08-13; current main is `ed7a1e1` through PR #9.
 
 Visible and functional:
 
@@ -58,8 +58,8 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 ## Evidence at the baseline
 
 - GitHub PRs #1 and #7: `verify`, CodeQL, and security checks passed from clean Ubuntu checkouts.
-- Current local acceptance before Booking release: 34 rendered UI/security tests.
-- Worker/D1 acceptance: all 189 tests across stress, extended, domain, auth, MCP, and platform shards.
+- Current local acceptance before Reporting release: 35 rendered UI/security tests.
+- Worker/D1 acceptance: all 190 tests across stress, extended, domain, auth, MCP, and platform shards.
 - Edge ingestion: 25 tests.
 - TypeScript and ESLint: clean.
 - Dependency audit: zero known npm vulnerabilities at merge time.
@@ -83,20 +83,22 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 | Public forms are write-only by slug | Visitors can fetch only the active published snapshot and submit bounded values; CRM data and draft history remain private. |
 | Booking management tokens are fragment-delivered and hash-only at rest | Private management credentials stay out of server logs and cannot be recovered from D1. |
 | Local-first booking provider boundary | A working self-hosted calendar is truthful today; external sync remains explicitly false until a real adapter is implemented. |
+| Reporting uses bounded created-record cohorts | Current state can be shown honestly without pretending the system has historical transition events it never stored. |
+| First-touch is directional, never causal attribution | A retained source label is evidence of grouping, not proof that a channel caused revenue. |
+| Monetary values remain separated by currency | Reporting never silently adds unlike currencies without an explicit FX normalization source. |
 
 ## Current workstream
 
-Branch to publish: `agent/booking-core`.
+Branch to publish: `agent/first-party-reporting`.
 
-Milestone completed locally: Booking includes draft/publish/revoke lifecycle, timezone-aware weekly availability, duration/buffer/notice/horizon controls, unauthenticated public booking, replay and double-booking conflict guards, hashed private management tokens, reschedule/cancel, contact/activity/audit evidence, appointment ledger, an explicit local-only provider boundary, and recovery schema version 27. Booking may remain visible because its primary admin-to-public-to-management journey passed. Publish and merge only through green CI.
+Booking merged through PR #9 after `verify`, CodeQL, and GitGuardian passed. First-party Reporting is completed locally: 7/30/90-day UTC cohorts, daily record arrival, contact lifecycle distribution, first-touch source grouping, permission-aware opportunity snapshots, pipeline-stage distribution, and currency-separated value registers. The surface explicitly labels snapshot data as non-historical and source grouping as non-causal. Publish and merge only through green CI.
 
-Evidence on 2026-08-13: `npm test` passed (34 rendered/runtime checks, all 189 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. The Booking acceptance test proves authorization, publish race behavior, one audit winner, local-only provider truth, privacy acknowledgement, honeypot behavior, simultaneous booking conflict, idempotent replay, hash-only token storage, token authorization, cancel race behavior, slot reopening, revoke, and ledger history. Edge acceptance proved admin creation/publish, public availability and submission, private reschedule/cancel, zero application console errors, and a visually responsive 390px emulation. Clean Linux CI and PR merge remain required.
+Reporting evidence on 2026-08-13: `npm test` passed (35 rendered/runtime checks, all 190 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Aggregation tests prove bounded range rejection, cohort exclusion, lifecycle/source grouping, currency separation, and opportunity-permission redaction. Edge proved filter changes, methodology disclosures, zero application console errors, and a 390px body with exact 390px width while the wide source register scrolls internally. Clean Linux CI and PR merge remain required.
 
 ## Next milestone sequence
 
-1. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
-2. Payments: provider-neutral ledger before any Stripe surface.
-3. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
+1. Payments: provider-neutral ledger before any Stripe surface.
+2. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 

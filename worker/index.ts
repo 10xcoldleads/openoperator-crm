@@ -1986,6 +1986,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/conversations/send": ["POST"],
     "/v1/admin/forms": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
+    "/v1/admin/reports/revenue-funnel": ["GET"],
   };
   if (exact[pathname]) return exact[pathname];
   const patterns: Array<[RegExp, string[]]> = [
@@ -5801,6 +5802,111 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       })),
       pipeline: pipelineCatalog,
       currentUser: { role: access.role },
+    });
+  }
+
+  if (url.pathname === "/v1/admin/reports/revenue-funnel" && request.method === "GET") {
+    const now = new Date();
+    const presetRaw = url.searchParams.get("preset") || "30";
+    const startRaw = url.searchParams.get("start");
+    const endRaw = url.searchParams.get("end");
+    let start: Date; let end: Date; let preset: string;
+    if (startRaw || endRaw) {
+      const parsedStart = startRaw ? parseLocalDate(startRaw) : null;
+      const parsedEnd = endRaw ? parseLocalDate(endRaw) : null;
+      if (!parsedStart || !parsedEnd) {
+        return json({ error: "Custom report ranges require start and end dates in YYYY-MM-DD format" }, 400);
+      }
+      start = parsedStart.date;
+      end = parsedEnd.date;
+      end.setUTCDate(end.getUTCDate() + 1);
+      preset = "custom";
+    } else {
+      const days = Number(presetRaw);
+      if (![7, 30, 90].includes(days)) return json({ error: "preset must be 7, 30, or 90" }, 400);
+      end = now;
+      start = new Date(end.getTime() - days * 86_400_000);
+      preset = String(days);
+    }
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start ||
+      end.getTime() - start.getTime() > 366 * 86_400_000 || end.getTime() > now.getTime() + 86_400_000) {
+      return json({ error: "Report range must be a valid interval of 366 days or fewer and cannot extend beyond today" }, 400);
+    }
+    const startIso = start.toISOString(); const endIso = end.toISOString();
+    const canReadOpportunities = await hasWorkspaceGrant(env, access, "opportunity", "read");
+    const [contactSummary, dailyContacts, lifecycle, sources, opportunitySummary, opportunityValues, dailyOpportunities, pipelineStages] = await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) new_contacts,
+        SUM(CASE WHEN status='customer' THEN 1 ELSE 0 END) current_customers
+        FROM contacts WHERE workspace_id=? AND created_at>=? AND created_at<?`).bind(workspaceId, startIso, endIso).first<Record<string, number>>(),
+      env.DB.prepare(`SELECT substr(created_at,1,10) day,COUNT(*) contacts,
+        SUM(CASE WHEN status='customer' THEN 1 ELSE 0 END) current_customers
+        FROM contacts WHERE workspace_id=? AND created_at>=? AND created_at<? GROUP BY substr(created_at,1,10) ORDER BY day`)
+        .bind(workspaceId, startIso, endIso).all<Record<string, unknown>>(),
+      env.DB.prepare(`SELECT stage,COUNT(*) contacts FROM contacts WHERE workspace_id=? AND created_at>=? AND created_at<?
+        GROUP BY stage ORDER BY contacts DESC,stage`).bind(workspaceId, startIso, endIso).all<Record<string, unknown>>(),
+      canReadOpportunities ? env.DB.prepare(`SELECT COALESCE(NULLIF(c.source_first,''),'direct / unknown') source,
+        COUNT(DISTINCT c.id) contacts,COUNT(DISTINCT CASE WHEN c.status='customer' THEN c.id END) current_customers,
+        COUNT(DISTINCT CASE WHEN o.status='won' THEN c.id END) won_contacts
+        FROM contacts c LEFT JOIN opportunities o ON o.workspace_id=c.workspace_id AND o.contact_id=c.id
+        WHERE c.workspace_id=? AND c.created_at>=? AND c.created_at<? GROUP BY COALESCE(NULLIF(c.source_first,''),'direct / unknown')
+        ORDER BY contacts DESC,source LIMIT 101`).bind(workspaceId, startIso, endIso).all<Record<string, unknown>>() :
+        env.DB.prepare(`SELECT COALESCE(NULLIF(source_first,''),'direct / unknown') source,COUNT(*) contacts,
+          SUM(CASE WHEN status='customer' THEN 1 ELSE 0 END) current_customers
+          FROM contacts WHERE workspace_id=? AND created_at>=? AND created_at<?
+          GROUP BY COALESCE(NULLIF(source_first,''),'direct / unknown') ORDER BY contacts DESC,source LIMIT 101`)
+          .bind(workspaceId, startIso, endIso).all<Record<string, unknown>>(),
+      canReadOpportunities ? env.DB.prepare(`SELECT COUNT(*) opportunities,
+        SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_opportunities,
+        SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) current_won,
+        SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) current_lost
+        FROM opportunities WHERE workspace_id=? AND created_at>=? AND created_at<?`).bind(workspaceId, startIso, endIso).first<Record<string, number>>() : null,
+      canReadOpportunities ? env.DB.prepare(`SELECT currency,
+        COALESCE(SUM(CASE WHEN status='open' THEN value ELSE 0 END),0) open_value,
+        COALESCE(SUM(CASE WHEN status='won' THEN value ELSE 0 END),0) current_won_value
+        FROM opportunities WHERE workspace_id=? AND created_at>=? AND created_at<? GROUP BY currency ORDER BY currency`)
+        .bind(workspaceId, startIso, endIso).all<Record<string, unknown>>() : null,
+      canReadOpportunities ? env.DB.prepare(`SELECT substr(created_at,1,10) day,COUNT(*) opportunities,
+        SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) current_won,
+        SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) current_lost
+        FROM opportunities WHERE workspace_id=? AND created_at>=? AND created_at<? GROUP BY substr(created_at,1,10) ORDER BY day`)
+        .bind(workspaceId, startIso, endIso).all<Record<string, unknown>>() : null,
+      canReadOpportunities ? env.DB.prepare(`SELECT p.id pipeline_id,p.name pipeline_name,s.id stage_id,s.name stage_name,s.position,s.category,s.color,
+        COUNT(o.id) opportunities
+        FROM pipelines p JOIN pipeline_stages s ON s.workspace_id=p.workspace_id AND s.pipeline_id=p.id
+        LEFT JOIN opportunities o ON o.workspace_id=p.workspace_id AND o.pipeline_id=p.id AND o.stage_id=s.id AND o.created_at>=? AND o.created_at<?
+        WHERE p.workspace_id=? AND p.active=1 GROUP BY p.id,s.id ORDER BY p.created_at,s.position`)
+        .bind(startIso, endIso, workspaceId).all<Record<string, unknown>>() : null,
+    ]);
+    const sourceRows = sources.results.slice(0, 100).map((row) => canReadOpportunities ? row : {
+      source: row.source, contacts: row.contacts, current_customers: row.current_customers,
+    });
+    return json({
+      range: { preset, start: startIso, end_exclusive: endIso, timezone: "UTC" },
+      permissions: { contacts: true, opportunities: canReadOpportunities },
+      summary: {
+        new_contacts: Number(contactSummary?.new_contacts || 0), current_customers: Number(contactSummary?.current_customers || 0),
+        ...(canReadOpportunities ? {
+          opportunities: Number(opportunitySummary?.opportunities || 0), open_opportunities: Number(opportunitySummary?.open_opportunities || 0),
+          current_won: Number(opportunitySummary?.current_won || 0), current_lost: Number(opportunitySummary?.current_lost || 0),
+        } : {}),
+      },
+      values_by_currency: canReadOpportunities ? opportunityValues?.results || [] : null,
+      daily: Array.from(new Set([...dailyContacts.results.map((row) => String(row.day)),
+        ...(canReadOpportunities ? dailyOpportunities?.results.map((row) => String(row.day)) || [] : [])])).sort().map((day) => ({
+          day, ...(dailyContacts.results.find((row) => row.day === day) || { contacts: 0, current_customers: 0 }),
+          ...(canReadOpportunities ? dailyOpportunities?.results.find((row) => row.day === day) ||
+            { opportunities: 0, current_won: 0, current_lost: 0 } : {}),
+        })),
+      lifecycle_distribution: lifecycle.results,
+      source_first_touch: { rows: sourceRows, truncated: sources.results.length > 100 },
+      pipeline_stage_snapshot: canReadOpportunities ? pipelineStages?.results || [] : null,
+      methodology: {
+        cohort: "Records created inside the selected UTC range, grouped by their current state.",
+        conversion: "Snapshot distribution only; this is not historical stage-transition conversion.",
+        attribution: "First-touch source grouping is directional and must not be interpreted as causal attribution.",
+        currency: "Values retain each record's stored currency; totals are not FX-normalized.",
+      },
+      generated_at: now.toISOString(),
     });
   }
 
