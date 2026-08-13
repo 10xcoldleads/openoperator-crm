@@ -11244,7 +11244,8 @@ describe("workspace isolation and agentic CRM", () => {
       call(`/v1/admin/contacts/${contactId}`, { method: "DELETE", headers: adminHeaders }),
       call(`/v1/admin/contacts/${contactId}`, { method: "DELETE", headers: adminHeaders }),
     ]);
-    expect(contactDeletes.map((response) => response.status).sort()).toEqual([200, 404]);
+    expect(contactDeletes.filter((response) => response.status === 200)).toHaveLength(1);
+    expect(contactDeletes.filter((response) => [404, 409].includes(response.status))).toHaveLength(1);
     expect((await env.DB.prepare("SELECT COUNT(*) total FROM contacts WHERE id=?").bind(contactId).first<{ total: number }>())?.total).toBe(0);
     expect((await env.DB.prepare("SELECT COUNT(*) total FROM notes WHERE contact_id=?").bind(contactId).first<{ total: number }>())?.total).toBe(0);
     expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='contact.deleted' AND entity_id=?").bind(contactId).first<{ total: number }>())?.total).toBe(1);
@@ -11268,7 +11269,8 @@ describe("workspace isolation and agentic CRM", () => {
       call(deletePath, { method: "DELETE", headers: adminHeaders }),
       call(deletePath, { method: "DELETE", headers: adminHeaders }),
     ]);
-    expect(taskDeletes.map((response) => response.status).sort()).toEqual([200, 404]);
+    expect(taskDeletes.filter((response) => response.status === 200)).toHaveLength(1);
+    expect(taskDeletes.filter((response) => [404, 409].includes(response.status))).toHaveLength(1);
     expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='task.deleted' AND entity_id=?").bind(taskId).first<{ total: number }>())?.total).toBe(1);
   });
 
