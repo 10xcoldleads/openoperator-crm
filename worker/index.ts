@@ -37,6 +37,13 @@ interface FrameworkEnv extends Env {
 async function authenticatedRequest(request: Request, env: FrameworkEnv): Promise<Request> {
   if (env.ALLOW_INSECURE_LOCAL_AUTH === "true") {
     if (request.headers.get("oai-authenticated-user-email")) return request;
+    const pathname = new URL(request.url).pathname;
+    const acceptsHtml = !pathname.startsWith("/v1/") && pathname !== "/mcp" &&
+      request.headers.get("accept")?.includes("text/html") === true;
+    const isBrowserNavigation = request.headers.get("sec-fetch-mode") === "navigate" &&
+      request.headers.get("sec-fetch-dest") === "document";
+    const sameOriginBrowserRequest = request.headers.get("sec-fetch-site") === "same-origin";
+    if (!acceptsHtml && !isBrowserNavigation && !sameOriginBrowserRequest) return request;
     const local = new Request(request);
     local.headers.set("oai-authenticated-user-email", "owner@example.com");
     return local;
@@ -67,6 +74,17 @@ async function authenticatedRequest(request: Request, env: FrameworkEnv): Promis
     }
   }
   throw new ApiError(503, "Authentication is not configured");
+}
+
+function usesIndependentCredential(pathname: string): boolean {
+  return pathname === "/v1/health" ||
+    pathname === "/mcp" || pathname === "/v1/mcp" ||
+    pathname === "/v1/contacts/upsert" ||
+    pathname === "/v1/integrations/skool/events" ||
+    pathname === "/v1/internal/jobs/webhook-retries" ||
+    /^\/v1\/integrations\/audience-intake\/audiencelab\/vti_[a-f0-9]{64}$/.test(pathname) ||
+    /^\/v1\/integrations\/visitor-intent\/(audiencelab|rb2b)\/vti_[a-f0-9]{64}$/.test(pathname) ||
+    /^\/v1\/hooks\/[^/]+$/.test(pathname);
 }
 type Json = Record<string, unknown>;
 function isPlainObject(value: unknown): value is Json {
@@ -12047,6 +12065,10 @@ const worker = {
         });
       }
       if (url.pathname === "/favicon.ico" && request.method === "GET") return faviconResponse();
+      if (usesIndependentCredential(url.pathname)) {
+        const independentlyAuthenticated = await api(request, env, url);
+        if (independentlyAuthenticated) return independentlyAuthenticated;
+      }
       request = await authenticatedRequest(request, env);
       const apiResponse = await api(request, env, url);
       if (apiResponse) return apiResponse;

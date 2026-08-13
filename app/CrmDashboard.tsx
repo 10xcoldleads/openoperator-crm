@@ -724,15 +724,15 @@ type LeadView = "inbox" | "contacts" | "companies" | "visitors";
 type ContactDrawerTab = "overview" | "timeline" | "related";
 type OpportunityDrawerTab = "overview" | "intelligence" | "execution" | "agent";
 type CompanyDrawerTab = "overview" | "relationships" | "timeline";
-const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string }> = [
-  { id: "dashboard", label: "Overview", icon: "⌂" },
-  { id: "leads", label: "Leads", icon: "◎" },
-  { id: "pipeline", label: "Pipeline", icon: "◇" },
-  { id: "tasks", label: "Tasks", icon: "✓" },
-  { id: "agent", label: "Agent Inbox", icon: "✦" },
-  { id: "automations", label: "Automations", icon: "⌁" },
-  { id: "integrations", label: "Integrations", icon: "↗" },
-  { id: "settings", label: "Settings", icon: "⚙" },
+const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; group: "Workspace" | "Intelligence" | "System" }> = [
+  { id: "dashboard", label: "Dashboard", icon: "D", group: "Workspace" },
+  { id: "leads", label: "Contacts", icon: "C", group: "Workspace" },
+  { id: "pipeline", label: "Opportunities", icon: "O", group: "Workspace" },
+  { id: "tasks", label: "Calendar & tasks", icon: "T", group: "Workspace" },
+  { id: "agent", label: "Agent work", icon: "A", group: "Intelligence" },
+  { id: "automations", label: "Automations", icon: "W", group: "Intelligence" },
+  { id: "integrations", label: "App connections", icon: "I", group: "System" },
+  { id: "settings", label: "Settings", icon: "S", group: "System" },
 ];
 
 const stageLabels: Record<string, string> = {
@@ -4788,17 +4788,23 @@ export default function CrmDashboard() {
 
   return <main className="crm-shell">
     <aside className="sidebar">
-      <div className="brand"><span>OO</span><b>OPEN<em>OPERATOR</em><small>AGENTIC CRM</small></b></div>
+      <div className="brand"><span>OO</span><b>OPENOPERATOR<small>OPERATIONS CRM</small></b></div>
+      <div className="workspace-identity" aria-label="Current workspace">
+        <span>O</span><div><b>{control?.workspace.name || "My workspace"}</b><small>Private workspace</small></div>
+      </div>
       <nav aria-label="CRM workspace">
-        {workspaceViews.map((view, index) => <button key={view.id} className={activeView === view.id ? "active" : ""} aria-label={view.label} title={view.label} aria-current={activeView === view.id ? "page" : undefined} onClick={() => { setActiveView(view.id); setError(""); setNotice(""); if (view.id === "agent") void load(); }}>
-          <i aria-hidden="true">{view.icon}</i><span>{view.label}</span><small>{String(index + 1).padStart(2, "0")}</small>
-        </button>)}
+        {(["Workspace", "Intelligence", "System"] as const).map((group) => <div className="nav-group" key={group}>
+          <p>{group}</p>
+          {workspaceViews.filter((view) => view.group === group).map((view) => <button key={view.id} className={activeView === view.id ? "active" : ""} aria-label={view.label} title={view.label} aria-current={activeView === view.id ? "page" : undefined} onClick={() => { setActiveView(view.id); setError(""); setNotice(""); if (view.id === "agent") void load(); }}>
+            <i aria-hidden="true">{view.icon}</i><span>{view.label}</span>
+          </button>)}
+        </div>)}
       </nav>
-      <div className="connection"><i></i><div><b>System online</b><span>Private · workspace isolated</span></div></div>
+      <div className="connection"><i></i><div><b>Workspace protected</b><span>Isolated and audited</span></div></div>
     </aside>
     <section className="workspace" id="dashboard" data-view={activeView}>
-      <header className="topbar"><div><p>OPENOPERATOR <b>/</b> {activeView.toUpperCase()}</p><h1>{activeView === "dashboard"
-        ? <GradientText colors={["#ef5045", "#7868ff", "#ef5045"]} animationSpeed={6} pauseOnHover>Overview</GradientText>
+      <header className="topbar"><div><p>{control?.workspace.name || "MY WORKSPACE"} <b>/</b> {activeView.toUpperCase()}</p><h1>{activeView === "dashboard"
+        ? <GradientText colors={["#3457d5", "#6857d9", "#3457d5"]} animationSpeed={8} pauseOnHover>Dashboard</GradientText>
         : workspaceViews.find((view) => view.id === activeView)?.label}</h1><small>{activeView === "dashboard" ? "Live revenue command center" : "Workspace operations"}</small></div>
         <div className="top-actions">{activeView === "leads" && leadView !== "visitors" && <input aria-label="Search contacts" placeholder="Search contacts..." value={query} onChange={(e) => { setQuery(e.target.value); setContactPage(1); setSelectedIds([]); setBulkReviewOpen(false); }} />}
           <button ref={commandTriggerRef} type="button" className="command-trigger" aria-haspopup="dialog" aria-expanded={commandOpen} onClick={() => setCommandOpen(true)}><span>SEARCH + JUMP</span><kbd>CTRL K</kbd></button>

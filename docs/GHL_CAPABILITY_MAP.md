@@ -20,3 +20,5 @@ This map comes from read-only observation of a configured GoHighLevel client sub
 ## Inclusion rule
 
 A feature is labeled implemented only when its server behavior, authorization boundary, persistence, failure state, and primary UI journey are tested. A catalog card or disabled button does not qualify.
+
+The live navigation contract and explicit omissions are maintained in [FEATURE_TRUTH_MATRIX.md](./FEATURE_TRUTH_MATRIX.md). Missing HighLevel modules are intentionally absent rather than represented by dead controls.

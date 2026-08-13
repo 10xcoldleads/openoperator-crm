@@ -7,7 +7,7 @@
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "run_worker_first": true
+    "run_worker_first": ["/*", "!/assets/*"]
   },
   "vars": {
     "ADMIN_EMAILS": "owner@example.com",

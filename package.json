@@ -7,7 +7,8 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "npm run build && wrangler d1 migrations apply DB --local --persist-to .wrangler/state --config dist/server/wrangler.json && wrangler dev --persist-to .wrangler/state --config dist/server/wrangler.json --var ALLOW_INSECURE_LOCAL_AUTH:true --var ADMIN_EMAILS:owner@example.com",
+    "dev:hot": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && npm run test:typecheck && npm run test:prepare && npm run test:twenty && node --test tests/rendered-html.test.mjs && node scripts/run-worker-tests.mjs && vitest run --config vitest.edge.config.ts",
