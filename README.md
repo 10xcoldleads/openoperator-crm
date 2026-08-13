@@ -9,6 +9,7 @@ This project is an independent open-source implementation. It is not affiliated 
 - Multi-workspace membership and role enforcement
 - Contacts, companies, deduplication, custom fields, saved views, imports, notes, and activity history
 - Consent-aware email conversations with persisted threads, explicit mailbox sync, suppression, and replay-safe Resend delivery
+- Versioned public forms with consent evidence, replay-safe submissions, publish/revoke lifecycle, and a CRM submission ledger
 - Configurable pipelines, stages, opportunities, forecasting, and optimistic updates
 - Tasks with contact/opportunity relationships and lifecycle controls
 - Visual event-driven automations with conditions, MATCH/ELSE branches, typed variables, run caps, traces, retries, and cancellation
@@ -27,7 +28,7 @@ The repository does not pretend to include a production telephony carrier, payme
 - UI: React 19 / Next-compatible Vinext application
 - Runtime: Cloudflare Workers
 - Database: Cloudflare D1
-- Public intake: isolated Worker with revocable source credentials and rate controls
+- Public intake: independently authenticated/write-only Worker routes with replay, rate, consent, and revocation controls
 - Automation: deterministic, bounded server execution
 - Agents: least-privilege MCP tools and human approval before sensitive writes
 

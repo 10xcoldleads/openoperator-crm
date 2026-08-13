@@ -58,6 +58,28 @@ test("server-renders the OpenOperator CRM shell", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
+test("ships a functional responsive secure forms surface", async () => {
+  const [dashboard, workspace, publicForm, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/FormsWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/f/[slug]/PublicForm.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0049_secure_forms.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "forms", label: "Forms"/);
+  assert.match(dashboard, /<FormsWorkspace active=\{activeView === "forms"\}/);
+  assert.match(workspace, /PUBLISH FORM/);
+  assert.match(workspace, /REVOKE FORM/);
+  assert.match(workspace, /OPEN PUBLIC FORM/);
+  assert.match(publicForm, /privacy_accepted: privacyAccepted/);
+  assert.match(publicForm, /email_consent: emailConsent/);
+  assert.match(publicForm, /className="form-honeypot"/);
+  assert.match(styles, /\.forms-layout \{ display:grid; grid-template-columns:250px minmax\(390px,1fr\) 290px/);
+  assert.match(styles, /@media \(max-width:760px\) \{ \.forms-workspace[\s\S]*\.forms-layout,\.form-editor \{ grid-template-columns:1fr/);
+  assert.match(migration, /form_submissions_form_idempotency_unique/);
+  assert.match(migration, /form_versions_form_version_unique/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);

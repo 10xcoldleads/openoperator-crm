@@ -537,6 +537,39 @@ export const agentRateWindows = sqliteTable("agent_rate_windows", {
   requestCount: integer("request_count").notNull().default(0),
 });
 
+export const forms = sqliteTable("forms", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(),
+  status: text("status", { enum: ["draft", "published", "revoked"] }).notNull().default("draft"),
+  title: text("title").notNull(), description: text("description").notNull().default(""), fields: text("fields").notNull(),
+  consentText: text("consent_text").notNull(), successMessage: text("success_message").notNull(),
+  publishedVersionId: text("published_version_id"), revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("forms_slug_unique").on(table.slug), index("forms_workspace_updated_idx").on(table.workspaceId, table.updatedAt, table.id)]);
+
+export const formVersions = sqliteTable("form_versions", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  formId: text("form_id").notNull().references(() => forms.id, { onDelete: "cascade" }), version: integer("version").notNull(),
+  title: text("title").notNull(), description: text("description").notNull(), fields: text("fields").notNull(),
+  consentText: text("consent_text").notNull(), successMessage: text("success_message").notNull(),
+  publishedBy: text("published_by").notNull(), publishedAt: text("published_at").notNull(),
+}, (table) => [uniqueIndex("form_versions_form_version_unique").on(table.workspaceId, table.formId, table.version)]);
+
+export const formSubmissions = sqliteTable("form_submissions", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  formId: text("form_id").notNull().references(() => forms.id, { onDelete: "cascade" }),
+  formVersionId: text("form_version_id").notNull().references(() => formVersions.id, { onDelete: "restrict" }),
+  idempotencyKey: text("idempotency_key").notNull(), contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "restrict" }),
+  payload: text("payload").notNull(), emailConsent: integer("email_consent", { mode: "boolean" }).notNull(),
+  consentText: text("consent_text").notNull(), ipHash: text("ip_hash"), userAgent: text("user_agent"), submittedAt: text("submitted_at").notNull(),
+}, (table) => [
+  uniqueIndex("form_submissions_form_idempotency_unique").on(table.workspaceId, table.formId, table.idempotencyKey),
+  index("form_submissions_form_recent_idx").on(table.workspaceId, table.formId, table.submittedAt, table.id),
+]);
+
 export const agentWorkspaceRateWindows = sqliteTable("agent_workspace_rate_windows", {
   workspaceId: text("workspace_id").primaryKey().references(() => workspaces.id),
   windowStart: integer("window_start").notNull(),
