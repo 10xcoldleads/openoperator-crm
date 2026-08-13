@@ -225,7 +225,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 28;
+const RECOVERY_SCHEMA_VERSION = 29;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -236,6 +236,7 @@ type RecoveryTable =
   | "visitor_events" | "visitor_intent_cases" | "mailbox_connections"
   | "communication_consents" | "conversation_threads" | "conversation_messages"
   | "forms" | "form_versions" | "form_submissions"
+  | "surveys" | "survey_versions" | "survey_responses"
   | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
   | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
@@ -273,6 +274,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   forms: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "fields", "consent_text", "success_message", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   form_versions: { columns: ["id", "workspace_id", "form_id", "version", "title", "description", "fields", "consent_text", "success_message", "published_by", "published_at"] },
   form_submissions: { columns: ["id", "workspace_id", "form_id", "form_version_id", "idempotency_key", "contact_id", "payload", "email_consent", "consent_text", "ip_hash", "user_agent", "submitted_at"] },
+  surveys: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "questions", "success_message", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  survey_versions: { columns: ["id", "workspace_id", "survey_id", "version", "title", "description", "questions", "success_message", "published_by", "published_at"] },
+  survey_responses: { columns: ["id", "workspace_id", "survey_id", "survey_version_id", "idempotency_key", "answers", "privacy_accepted", "started_at", "submitted_at", "duration_seconds", "ip_hash", "user_agent"] },
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
@@ -2431,6 +2435,12 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     requireReference("form_submissions", row, "form_version_id", "form_versions");
     requireReference("form_submissions", row, "contact_id", "contacts");
   }
+  for (const row of tables.survey_versions) requireReference("survey_versions", row, "survey_id", "surveys");
+  for (const row of tables.surveys) requireReference("surveys", row, "published_version_id", "survey_versions", true);
+  for (const row of tables.survey_responses) {
+    requireReference("survey_responses", row, "survey_id", "surveys");
+    requireReference("survey_responses", row, "survey_version_id", "survey_versions");
+  }
   for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
   for (const row of tables.booking_appointments) {
     requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
@@ -2516,6 +2526,29 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     if (formIdempotency.has(identity) || !/^[A-Za-z0-9._:-]{8,100}$/.test(String(row.idempotency_key)) ||
       ![0, 1].includes(Number(row.email_consent))) throw new ApiError(400, "Backup contains an invalid form submission");
     formIdempotency.add(identity);
+  }
+  const surveySlugs = new Set<string>(); const surveyVersionNumbers = new Set<string>(); const surveyIdempotency = new Set<string>();
+  for (const row of tables.surveys) {
+    if (surveySlugs.has(String(row.slug)) || !/^[a-z0-9][a-z0-9-]{2,79}$/.test(String(row.slug)) ||
+      !["draft", "published", "revoked"].includes(String(row.status)) || !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid survey");
+    }
+    surveySlugs.add(String(row.slug));
+    try { validateSurveyQuestions(JSON.parse(String(row.questions))); } catch { throw new ApiError(400, "Backup contains invalid survey questions"); }
+  }
+  for (const row of tables.survey_versions) {
+    const identity = `${row.survey_id}:${row.version}`;
+    if (surveyVersionNumbers.has(identity) || !Number.isInteger(row.version) || Number(row.version) < 1) throw new ApiError(400, "Backup contains an invalid survey version");
+    surveyVersionNumbers.add(identity);
+    try { validateSurveyQuestions(JSON.parse(String(row.questions))); } catch { throw new ApiError(400, "Backup contains invalid survey version questions"); }
+  }
+  for (const row of tables.survey_responses) {
+    const identity = `${row.survey_id}:${row.idempotency_key}`;
+    if (surveyIdempotency.has(identity) || !/^[A-Za-z0-9._:-]{8,100}$/.test(String(row.idempotency_key)) || Number(row.privacy_accepted) !== 1 ||
+      !Number.isFinite(Date.parse(String(row.submitted_at))) || row.duration_seconds !== null && (!Number.isInteger(row.duration_seconds) || Number(row.duration_seconds) < 0 || Number(row.duration_seconds) > 86400)) {
+      throw new ApiError(400, "Backup contains an invalid survey response");
+    }
+    surveyIdempotency.add(identity);
   }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
@@ -5153,6 +5186,30 @@ async function retainScheduledOperationsHealth(env: FrameworkEnv, observedAt = n
 }
 
 type FormField = { key: "email" | "first_name" | "last_name" | "phone" | "company" | "message"; label: string; type: "email" | "text" | "tel" | "textarea"; required: boolean };
+type SurveyQuestion = { id: string; label: string; type: "short_text" | "long_text" | "email" | "single_choice" | "multi_choice" | "rating"; required: boolean; options: string[] };
+function validateSurveyQuestions(value: unknown): SurveyQuestion[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 30) throw new ApiError(400, "questions must contain 1 to 30 supported questions");
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["id", "label", "type", "required", "options"].includes(key))) throw new ApiError(400, "A survey question is malformed");
+    const questionId = optionalString(raw.id, "question id", 40) || ""; const label = optionalString(raw.label, "question label", 160) || "";
+    const type = optionalString(raw.type, "question type", 30) as SurveyQuestion["type"];
+    const options = Array.isArray(raw.options) ? raw.options.map((option) => typeof option === "string" ? option.trim() : "") : [];
+    if (!/^[a-z][a-z0-9_]{2,39}$/.test(questionId) || seen.has(questionId) || !label || typeof raw.required !== "boolean" ||
+      !["short_text", "long_text", "email", "single_choice", "multi_choice", "rating"].includes(type) ||
+      options.some((option) => !option || option.length > 100) || new Set(options).size !== options.length ||
+      (["single_choice", "multi_choice"].includes(type) ? options.length < 2 || options.length > 12 : options.length !== 0)) {
+      throw new ApiError(400, "A survey question is invalid or duplicated");
+    }
+    seen.add(questionId); return { id: questionId, label, type, required: raw.required, options };
+  });
+}
+function safeSurvey(row: Record<string, unknown>) {
+  return { id: row.id, name: row.name, slug: row.slug, status: row.status, title: row.title, description: row.description,
+    questions: JSON.parse(String(row.questions)), success_message: row.success_message, published_version_id: row.published_version_id,
+    revision: row.revision, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
+    public_path: row.status === "published" ? `/s/${row.slug}` : null };
+}
 const formFieldDefaults: FormField[] = [
   { key: "email", label: "Email", type: "email", required: true },
   { key: "first_name", label: "First name", type: "text", required: false },

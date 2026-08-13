@@ -106,6 +106,8 @@ Payments remote evidence: PR #11 clean Linux `verify` passed in 4m31s; CodeQL an
 
 The next vertical slice is Surveys, not a combined Sites/Surveys placeholder. It will have its own versioned definition and published snapshot, multi-step response lifecycle, replay-safe public submission, permission/audit/recovery contracts, and response ledger/summary. Secure Forms may supply proven validation and publication patterns, but survey responses and analytics require separate tables and APIs. Sites remains omitted until its page/version/domain/publication lifecycle is independently mapped and proven.
 
+Survey foundation on active branch: migration `0052_surveys_core.sql` and Drizzle schema define workspace-scoped survey drafts, immutable published versions, and immutable responses. Questions use stable operator-defined IDs and support bounded short text, long text, email, single choice, multiple choice, and 1–5 rating types. Response evidence includes replay identity, exact version, required privacy acknowledgement, optional start time, bounded duration, hashed IP, user agent, and submission time. Recovery schema version 29 includes reference, slug/version/replay, question-shape, privacy, timestamp, and duration validation. TypeScript passed after this foundation. APIs/UI/tests are still pending; Surveys must remain absent from navigation until those are proven.
+
 ## Next milestone sequence
 
 1. Surveys: separate versioned publish/respond lifecycle and response evidence; do not relabel Forms.
