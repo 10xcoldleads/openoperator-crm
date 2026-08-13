@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, and Surveys milestones to `main` on 2026-08-13; current main is `cdaf156` through PR #12. Sites is the active independently proven vertical slice on `agent/sites`.
+Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, and hosted-path Sites milestones to `main` on 2026-08-13; current main is `336de08` through PR #13.
 
 Visible and functional:
 
@@ -49,7 +49,6 @@ Visible and functional:
 
 Explicitly omitted from navigation on `main`:
 
-- Sites until the active branch completes its remote merge gates
 - Calendar-provider sync; payment processors, banking, invoices, payouts, settlements, FX conversion, and reconciliation
 - Marketing/social publishing
 - Reputation management
@@ -97,7 +96,7 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Active branch: `agent/sites`; implementation is complete locally and awaiting the final full gate, commit, pull request, and clean Linux merge evidence.
+Active branch: `agent/marketing-orientation`; no Marketing implementation exists yet. The first task is to define one honest, provider-bounded publication lifecycle rather than exposing a broad social-marketing shell.
 
 Booking merged through PR #9, first-party Reporting through PR #10, and provider-neutral Payments through PR #11. Payments is now on `main` at merge commit `387054bc518a6b13a75ed15661e3f54528b95b9e`; it adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI.
 
@@ -125,10 +124,17 @@ Sites local evidence on 2026-08-13: the complete `npm test` gate passed in 7m00s
 
 Sites Edge acceptance on 2026-08-13: an admin created `Sites acceptance proof`, built a two-page site, added a bounded features block, saved the draft, and completed the two-step publish control. The public V1 rendered the saved hero, text, features, navigation, and inactive-custom-domain disclosure. Navigating to `/evidence` applied title `Evidence` and meta description `How OpenOperator proves safe publication.` Editing the draft hero to `PRIVATE DRAFT CHANGE` left the public V1 headline unchanged, proving browser-visible publication freezing. At 390px the public page reported `innerWidth=bodyClientWidth=bodyScrollWidth=documentScrollWidth=390`; the admin Sites route also reported 390px containment under per-tab device emulation. Admin and public tabs produced zero application errors. The two-step revoke control changed the admin state to `revoked` and the public route to `Page unavailable / Published site not found`.
 
+Sites remote evidence: PR #13 clean Linux `verify` passed in 4m19s; CodeQL analysis and result passed; GitGuardian passed. It merged 2026-08-13 at `336de083909f387563e0b25a1900e77457affe6d`. Sites is now part of the proven `main` baseline, not pending work.
+
+Marketing orientation on active branch `agent/marketing-orientation`: the first honest slice will be **consent-aware Resend email campaigns**, not a generic social scheduler. It reuses the already encrypted, workspace-owned, verified Resend connection and the authoritative Contact/`communication_consents` records. A campaign is a workspace draft with bounded name, subject, plain-text body, and an explicit set of Contact IDs; publication freezes an immutable campaign version and a recipient snapshot. Only Contacts that still have an email and current `opted_in` + `express` email consent at launch may enter that snapshot. Unknown, contractual, inbound-request, opted-out, missing-email, duplicate-email, and suppressed recipients are excluded with persisted reason counts. Launch is admin-only, requires a two-step human confirmation, and is a one-time bounded operation—not an implied scheduler. Every recipient gets its own idempotency key, pending/succeeded/failed state, provider receipt or redacted error, and audit evidence. Consent is rechecked immediately before each provider call so a post-snapshot opt-out still suppresses delivery. Retries may target only failed, still-consented recipients and must never resend a succeeded recipient. Immediate campaign cancellation stops unsent work but cannot recall provider-accepted email.
+
+Marketing first-slice boundaries: no HTML editor, attachments, link tracking, open tracking, attribution claims, automated list growth, purchased/unknown-consent audiences, social networks, recurring schedules, timezone sends, A/B testing, custom sending domains, unsubscribe-hosting claims, or unlimited bulk throughput. Existing public Forms remain the source of explicit opt-in and existing Contact consent controls remain the suppression authority. A public one-click unsubscribe route must be added before any real marketing launch is considered complete; its token must be unguessable, hash-only at rest, purpose-bound to workspace/contact/email, replay-safe, and must atomically write `opted_out`/`manual_suppression` plus audit evidence without exposing CRM data. Provider webhooks and delivery-state synchronization remain a later adapter unless included and proven in the same slice; initial `succeeded` means provider accepted, not delivered or opened.
+
 ## Next milestone sequence
 
-1. Finish Sites full local gate, PR checks, merge, and exact memory evidence.
-2. Orient the next omitted product surface from the truth matrix; do not expose it until a complete independently proven vertical slice exists.
+1. Marketing orientation: choose the smallest authoritative provider-backed publication lifecycle and write its credential, permission, scheduling, idempotency, audit, failure, recovery, and human-approval contracts before implementation.
+2. Implement and expose that Marketing slice only after persistence, authorization, provider failure behavior, automated acceptance, and browser proof exist.
+3. Keep Reputation, ads/call attribution, voice carrier, custom domains, calendar sync, and payment-provider surfaces omitted until each receives an independent contract and proof cycle.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 
