@@ -8593,9 +8593,15 @@ describe("workspace isolation and agentic CRM", () => {
     expect(requeues.map((response) => response.status).sort()).toEqual([200, 409]);
     expect(await env.DB.prepare("SELECT status,result,claimed_by_credential_id,claim_expires_at FROM agent_work_items WHERE id=?")
       .bind(workItemId).first()).toEqual({ status: "queued", result: null, claimed_by_credential_id: null, claim_expires_at: null });
-    expect((await env.DB.prepare(`SELECT COUNT(*) total FROM audit_log WHERE entity_id=? AND action IN
-      ('agent.work_item_claimed','agent.work_item_renewed','agent.work_item_failed','agent.work_item_requeued')`)
-      .bind(workItemId).first<{ total: number }>())?.total).toBe(4);
+    expect((await env.DB.prepare(`SELECT action,COUNT(*) total FROM audit_log WHERE entity_id=? AND action IN
+      ('agent.work_item_claimed','agent.work_item_renewed','agent.work_item_failed','agent.work_item_requeued')
+      GROUP BY action ORDER BY action`)
+      .bind(workItemId).all<{ action: string; total: number }>()).results).toEqual([
+        { action: "agent.work_item_claimed", total: 1 },
+        { action: "agent.work_item_failed", total: 1 },
+        { action: "agent.work_item_renewed", total: 1 },
+        { action: "agent.work_item_requeued", total: 1 },
+      ]);
 
     expect((await mcp(second.api_key, "tools/call", { name: "crm_claim_work_item", arguments: {} })
       .then((response) => response.json()) as { result: { structuredContent: { claimed: boolean } } })

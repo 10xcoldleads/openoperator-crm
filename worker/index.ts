@@ -3358,7 +3358,7 @@ async function agentWorkItemRequeueAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'agent.work_item_requeued','agent_work_item',?,?,?,?,?,?
-    WHERE changes()>0 AND EXISTS(SELECT 1 FROM agent_work_items
+    WHERE EXISTS(SELECT 1 FROM agent_work_items
       WHERE workspace_id=? AND id=? AND updated_at=?
         AND (status='failed' OR (status='claimed' AND claim_expires_at<=?)))`)
     .bind(id("audit"), access.workspaceId, access.email, workItemId, JSON.stringify(before), JSON.stringify(after),
@@ -9337,18 +9337,25 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const updatedAt = new Date(Math.max(Date.now(), Date.parse(String(before.updated_at)) + 1)).toISOString();
     const after = { ...before, status: "queued", claimed_by_credential_id: null, claim_expires_at: null,
       result: null, completed_at: null, updated_at: updatedAt };
-    const requeued = await env.DB.batch([
-      env.DB.prepare(`UPDATE agent_work_items
-        SET status='queued',claimed_by_credential_id=NULL,claim_expires_at=NULL,result=NULL,completed_at=NULL,updated_at=?
-        WHERE workspace_id=? AND id=? AND updated_at=?
-          AND (status='failed' OR (status='claimed' AND claim_expires_at<=?))`)
-        .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, requeueAt),
-      await agentWorkItemRequeueAuditStatement(env, access, request,
-        agentWorkItemRequeueMatch[1], before, after, updatedAt, requeueAt),
-    ]);
-    if (!requeued[0].meta.changes) {
-      return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
+    let requeued: D1Result<unknown>[];
+    try {
+      requeued = await env.DB.batch([
+        await agentWorkItemRequeueAuditStatement(env, access, request,
+          agentWorkItemRequeueMatch[1], before, after, expectedUpdatedAt, requeueAt),
+        env.DB.prepare(`UPDATE agent_work_items
+          SET status='queued',claimed_by_credential_id=NULL,claim_expires_at=NULL,result=NULL,completed_at=NULL,updated_at=?
+          WHERE workspace_id=? AND id=? AND updated_at=?
+            AND (status='failed' OR (status='claimed' AND claim_expires_at<=?))`)
+          .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, requeueAt),
+        env.DB.prepare("INSERT INTO atomic_mutation_guard(ok) SELECT 0 WHERE changes()=0"),
+      ]);
+    } catch (error) {
+      if (String(error).includes("atomic_mutation_must_win")) {
+        return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
+      }
+      throw error;
     }
+    if (!requeued[1].meta.changes) return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
     return json({ ok: true, work_item: after });
   }
 
