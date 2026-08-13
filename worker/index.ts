@@ -84,6 +84,8 @@ function usesIndependentCredential(pathname: string): boolean {
     pathname === "/v1/internal/jobs/webhook-retries" ||
     /^\/v1\/integrations\/audience-intake\/audiencelab\/vti_[a-f0-9]{64}$/.test(pathname) ||
     /^\/v1\/integrations\/visitor-intent\/(audiencelab|rb2b)\/vti_[a-f0-9]{64}$/.test(pathname) ||
+    /^\/v1\/public\/forms\/[a-z0-9][a-z0-9-]{2,79}(?:\/submissions)?$/.test(pathname) ||
+    /^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
     /^\/v1\/hooks\/[^/]+$/.test(pathname);
 }
 type Json = Record<string, unknown>;
@@ -220,7 +222,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 25;
+const RECOVERY_SCHEMA_VERSION = 26;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -229,7 +231,8 @@ type RecoveryTable =
   | "saved_views" | "opportunities" | "tasks" | "automation_rules" | "automation_runs"
   | "visitor_connectors" | "audience_imports" | "visitor_profiles" | "audience_import_members"
   | "visitor_events" | "visitor_intent_cases" | "mailbox_connections"
-  | "communication_consents" | "conversation_threads" | "conversation_messages";
+  | "communication_consents" | "conversation_threads" | "conversation_messages"
+  | "forms" | "form_versions" | "form_submissions";
 type RecoverySpec = { columns: string[] };
 const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   pipelines: { columns: ["id", "workspace_id", "name", "object_type", "active", "created_at", "updated_at"] },
@@ -262,6 +265,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   communication_consents: { columns: ["id", "workspace_id", "contact_id", "channel", "status", "basis", "evidence", "captured_at", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   conversation_threads: { columns: ["id", "workspace_id", "contact_id", "channel", "provider", "provider_thread_id", "participant_email", "subject", "status", "last_message_at", "unread_count", "revision", "change_id", "created_at", "updated_at"] },
   conversation_messages: { columns: ["id", "workspace_id", "thread_id", "direction", "provider", "provider_message_id", "idempotency_key", "from_email", "to_email", "subject", "body_text", "purpose", "status", "error", "sent_by", "occurred_at", "created_at", "updated_at"] },
+  forms: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "fields", "consent_text", "success_message", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  form_versions: { columns: ["id", "workspace_id", "form_id", "version", "title", "description", "fields", "consent_text", "success_message", "published_by", "published_at"] },
+  form_submissions: { columns: ["id", "workspace_id", "form_id", "form_version_id", "idempotency_key", "contact_id", "payload", "email_consent", "consent_text", "ip_hash", "user_agent", "submitted_at"] },
 };
 const recoveryTables = Object.keys(recoverySpecs) as RecoveryTable[];
 const securityHeaders = {
@@ -1971,6 +1977,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/resend-connection/send": ["POST"],
     "/v1/admin/conversations": ["GET"],
     "/v1/admin/conversations/send": ["POST"],
+    "/v1/admin/forms": ["GET", "POST"],
   };
   if (exact[pathname]) return exact[pathname];
   const patterns: Array<[RegExp, string[]]> = [
@@ -1995,6 +2002,9 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/contacts\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
     [/^\/v1\/admin\/contacts\/[^/]+\/communication-consent$/, ["GET", "PUT"]],
     [/^\/v1\/admin\/conversations\/thread_[a-f0-9]{32}$/, ["GET", "PATCH"]],
+    [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}$/, ["GET", "PATCH"]],
+    [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
+    [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}\/submissions$/, ["GET"]],
     [/^\/v1\/admin\/opportunities\/[^/]+\/intelligence$/, ["GET"]],
     [/^\/v1\/admin\/opportunities\/[^/]+$/, ["PATCH", "DELETE"]],
     [/^\/v1\/admin\/tasks\/[^/]+$/, ["PATCH", "DELETE"]],
@@ -2397,6 +2407,38 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
   }
   for (const row of tables.conversation_messages) {
     requireReference("conversation_messages", row, "thread_id", "conversation_threads");
+  }
+  for (const row of tables.form_versions) requireReference("form_versions", row, "form_id", "forms");
+  for (const row of tables.forms) requireReference("forms", row, "published_version_id", "form_versions", true);
+  for (const row of tables.form_submissions) {
+    requireReference("form_submissions", row, "form_id", "forms");
+    requireReference("form_submissions", row, "form_version_id", "form_versions");
+    requireReference("form_submissions", row, "contact_id", "contacts");
+  }
+  const formSlugs = new Set<string>();
+  for (const row of tables.forms) {
+    if (formSlugs.has(String(row.slug)) || !/^[a-z0-9][a-z0-9-]{2,79}$/.test(String(row.slug)) ||
+      !["draft", "published", "revoked"].includes(String(row.status)) || !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid form");
+    }
+    formSlugs.add(String(row.slug));
+    try { validateFormFields(JSON.parse(String(row.fields))); } catch { throw new ApiError(400, "Backup contains invalid form fields"); }
+  }
+  const formVersionNumbers = new Set<string>();
+  for (const row of tables.form_versions) {
+    const identity = `${row.form_id}:${row.version}`;
+    if (formVersionNumbers.has(identity) || !Number.isInteger(row.version) || Number(row.version) < 1) {
+      throw new ApiError(400, "Backup contains an invalid form version");
+    }
+    formVersionNumbers.add(identity);
+    try { validateFormFields(JSON.parse(String(row.fields))); } catch { throw new ApiError(400, "Backup contains invalid form version fields"); }
+  }
+  const formIdempotency = new Set<string>();
+  for (const row of tables.form_submissions) {
+    const identity = `${row.form_id}:${row.idempotency_key}`;
+    if (formIdempotency.has(identity) || !/^[A-Za-z0-9._:-]{8,100}$/.test(String(row.idempotency_key)) ||
+      ![0, 1].includes(Number(row.email_consent))) throw new ApiError(400, "Backup contains an invalid form submission");
+    formIdempotency.add(identity);
   }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
@@ -5033,6 +5075,47 @@ async function retainScheduledOperationsHealth(env: FrameworkEnv, observedAt = n
   return { results, sampled: selected.length, total: Number(total?.total || 0), cursor_workspace_id: lastWorkspaceId };
 }
 
+type FormField = { key: "email" | "first_name" | "last_name" | "phone" | "company" | "message"; label: string; type: "email" | "text" | "tel" | "textarea"; required: boolean };
+const formFieldDefaults: FormField[] = [
+  { key: "email", label: "Email", type: "email", required: true },
+  { key: "first_name", label: "First name", type: "text", required: false },
+  { key: "last_name", label: "Last name", type: "text", required: false },
+  { key: "phone", label: "Phone", type: "tel", required: false },
+  { key: "company", label: "Company", type: "text", required: false },
+  { key: "message", label: "How can we help?", type: "textarea", required: false },
+];
+function validateFormFields(value: unknown): FormField[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 6) throw new ApiError(400, "fields must contain 1 to 6 supported fields");
+  const seen = new Set<string>();
+  const fields = value.map((raw) => {
+    if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["key", "label", "type", "required"].includes(key))) {
+      throw new ApiError(400, "A form field is malformed");
+    }
+    const key = optionalString(raw.key, "field key", 30) as FormField["key"];
+    const label = optionalString(raw.label, "field label", 80) || "";
+    const type = optionalString(raw.type, "field type", 20) as FormField["type"];
+    const allowedType: Record<FormField["key"], FormField["type"]> = { email: "email", first_name: "text", last_name: "text", phone: "tel", company: "text", message: "textarea" };
+    if (!Object.hasOwn(allowedType, key) || allowedType[key] !== type || seen.has(key) || typeof raw.required !== "boolean" || !label) {
+      throw new ApiError(400, "A form field is invalid or duplicated");
+    }
+    seen.add(key); return { key, label, type, required: raw.required };
+  });
+  const email = fields.find((field) => field.key === "email");
+  if (!email?.required) throw new ApiError(400, "A required email field must be present");
+  return fields;
+}
+function safeForm(row: Record<string, unknown>) {
+  return { id: row.id, name: row.name, slug: row.slug, status: row.status, title: row.title,
+    description: row.description, fields: JSON.parse(String(row.fields)), consent_text: row.consent_text,
+    success_message: row.success_message, published_version_id: row.published_version_id,
+    revision: row.revision, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
+    public_path: row.status === "published" ? `/f/${row.slug}` : null };
+}
+function safeFormSubmission(row: Record<string, unknown>) {
+  return { id: row.id, form_id: row.form_id, form_version_id: row.form_version_id, contact_id: row.contact_id,
+    payload: JSON.parse(String(row.payload)), email_consent: Boolean(row.email_consent), submitted_at: row.submitted_at };
+}
+
 async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Response | null> {
   const mcpResponse = await handleAgentMcp(request, env, url);
   if (mcpResponse) return mcpResponse;
@@ -5041,6 +5124,110 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
   if (url.pathname === "/v1/health") {
     if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
     return json({ ok: true, service: "openoperator-crm", version: 1 });
+  }
+
+  const publicFormMatch = url.pathname.match(/^\/v1\/public\/forms\/([a-z0-9][a-z0-9-]{2,79})$/);
+  if (publicFormMatch) {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
+    const row = await env.DB.prepare(`SELECT f.slug,f.status,v.id version_id,v.version,v.title,v.description,v.fields,v.consent_text,v.success_message
+      FROM forms f JOIN form_versions v ON v.id=f.published_version_id AND v.workspace_id=f.workspace_id
+      WHERE f.slug=? AND f.status='published'`).bind(publicFormMatch[1]).first<Record<string, unknown>>();
+    if (!row) return json({ error: "Published form not found" }, 404);
+    return json({ form: { slug: row.slug, version: row.version, title: row.title, description: row.description,
+      fields: JSON.parse(String(row.fields)), consent_text: row.consent_text, success_message: row.success_message },
+      privacy: { data_use: "CRM follow-up requested by the submitter", email_marketing_optional: true } });
+  }
+
+  const publicFormSubmissionMatch = url.pathname.match(/^\/v1\/public\/forms\/([a-z0-9][a-z0-9-]{2,79})\/submissions$/);
+  if (publicFormSubmissionMatch) {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json;
+    try { body = await readJson(request); } catch (error) {
+      return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400);
+    }
+    if (Object.keys(body).some((key) => !["values", "privacy_accepted", "email_consent", "idempotency_key", "website"].includes(key))) {
+      return json({ error: "Submission contains unsupported fields" }, 400);
+    }
+    if (typeof body.website === "string" && body.website.trim()) return json({ ok: true, accepted: true }, 202);
+    if (body.privacy_accepted !== true) return json({ error: "Privacy acknowledgement is required" }, 400);
+    if (body.email_consent !== true && body.email_consent !== false) return json({ error: "email_consent must be true or false" }, 400);
+    const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) return json({ error: "idempotency_key is invalid" }, 400);
+    if (!isPlainObject(body.values)) return json({ error: "values must be an object" }, 400);
+    const published = await env.DB.prepare(`SELECT f.id form_id,f.workspace_id,f.slug,v.id version_id,v.fields,v.consent_text,v.success_message
+      FROM forms f JOIN form_versions v ON v.id=f.published_version_id AND v.workspace_id=f.workspace_id
+      WHERE f.slug=? AND f.status='published'`).bind(publicFormSubmissionMatch[1]).first<Record<string, unknown>>();
+    if (!published) return json({ error: "Published form not found" }, 404);
+    const fields = validateFormFields(JSON.parse(String(published.fields)));
+    const allowedKeys = new Set(fields.map((field) => field.key));
+    if (Object.keys(body.values).some((key) => !allowedKeys.has(key as FormField["key"]))) return json({ error: "values contain an unsupported field" }, 400);
+    const values: Record<string, string> = {};
+    for (const field of fields) {
+      const value = typeof body.values[field.key] === "string" ? String(body.values[field.key]).trim() : "";
+      const max = field.key === "message" ? 4000 : field.key === "email" ? 254 : 200;
+      if (field.required && !value) return json({ error: `${field.label} is required` }, 400);
+      if (value.length > max) return json({ error: `${field.label} is too long` }, 400);
+      if (value) values[field.key] = value;
+    }
+    const email = normalizeEmail(values.email);
+    if (!validEmail(email)) return json({ error: "A valid email is required" }, 400);
+    values.email = email;
+    const existingSubmission = await env.DB.prepare(`SELECT * FROM form_submissions WHERE workspace_id=? AND form_id=? AND idempotency_key=?`)
+      .bind(published.workspace_id, published.form_id, idempotencyKey).first<Record<string, unknown>>();
+    if (existingSubmission) {
+      if (existingSubmission.payload !== JSON.stringify(values) || Boolean(existingSubmission.email_consent) !== body.email_consent) {
+        return json({ error: "Idempotency key was already used for a different submission" }, 409);
+      }
+      return json({ ok: true, duplicate: true, submission_id: existingSubmission.id, success_message: published.success_message });
+    }
+    const ip = request.headers.get("cf-connecting-ip");
+    const ipHash = ip ? await sha256(`${published.workspace_id}:${ip}`) : null;
+    if (ipHash) {
+      const recent = await env.DB.prepare(`SELECT COUNT(*) total FROM form_submissions WHERE workspace_id=? AND form_id=? AND ip_hash=? AND submitted_at>?`)
+        .bind(published.workspace_id, published.form_id, ipHash, new Date(Date.now() - 600_000).toISOString()).first<{ total: number }>();
+      if (Number(recent?.total || 0) >= 10) return json({ error: "Too many submissions. Try again later." }, 429, { "retry-after": "600" });
+    }
+    const existingContact = await env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND email=?")
+      .bind(published.workspace_id, email).first<{ id: string }>();
+    const contactId = existingContact?.id || `con_${(await sha256(`${published.workspace_id}:${email}`)).slice(0, 32)}`;
+    const now = new Date().toISOString();
+    const submissionId = id("fsub");
+    const activityId = id("act");
+    const consentId = id("consent");
+    try {
+      const statements = [
+        env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,first_name,last_name,phone,company,status,stage,score,tags,custom_fields,source_first,source_last,last_activity_at,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,'lead','new',0,'["form"]','{}',?,?,?, ?,?)
+          ON CONFLICT(workspace_id,email) DO UPDATE SET first_name=COALESCE(NULLIF(contacts.first_name,''),excluded.first_name),
+            last_name=COALESCE(NULLIF(contacts.last_name,''),excluded.last_name),phone=COALESCE(NULLIF(contacts.phone,''),excluded.phone),
+            company=COALESCE(NULLIF(contacts.company,''),excluded.company),source_last=excluded.source_last,last_activity_at=excluded.last_activity_at,updated_at=excluded.updated_at`)
+          .bind(contactId, published.workspace_id, email, values.first_name || null, values.last_name || null,
+            values.phone || null, values.company || null, `form:${published.slug}`, `form:${published.slug}`, now, now, now),
+        env.DB.prepare(`INSERT INTO form_submissions(id,workspace_id,form_id,form_version_id,idempotency_key,contact_id,payload,email_consent,consent_text,ip_hash,user_agent,submitted_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(submissionId, published.workspace_id, published.form_id, published.version_id,
+          idempotencyKey, contactId, JSON.stringify(values), body.email_consent ? 1 : 0, String(published.consent_text), ipHash,
+          (request.headers.get("user-agent") || "").slice(0, 300) || null, now),
+        env.DB.prepare(`INSERT INTO activities(id,workspace_id,contact_id,source_id,type,title,body,metadata,external_id,occurred_at,created_at)
+          VALUES(?,?,?,NULL,'form.submitted','Form submitted',?,?,?, ?,?)`).bind(activityId, published.workspace_id, contactId,
+          values.message || "Public form submission", JSON.stringify({ form_id: published.form_id, version_id: published.version_id,
+            email_consent: body.email_consent }), submissionId, now, now),
+      ];
+      if (body.email_consent) statements.push(env.DB.prepare(`INSERT INTO communication_consents
+        (id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,'email','opted_in','express',?,?,1,?,'public-form',?,?)
+        ON CONFLICT(workspace_id,contact_id,channel) DO UPDATE SET status='opted_in',basis='express',evidence=excluded.evidence,
+          captured_at=excluded.captured_at,revision=communication_consents.revision+1,change_id=excluded.change_id,updated_at=excluded.updated_at
+        WHERE communication_consents.status<>'opted_out'`)
+        .bind(consentId, published.workspace_id, contactId, `Form ${published.form_id} version ${published.version_id}: ${published.consent_text}`,
+          now, id("chg"), now, now));
+      await env.DB.batch(statements);
+    } catch {
+      const raced = await env.DB.prepare(`SELECT id FROM form_submissions WHERE workspace_id=? AND form_id=? AND idempotency_key=?`)
+        .bind(published.workspace_id, published.form_id, idempotencyKey).first<{ id: string }>();
+      if (raced) return json({ ok: true, duplicate: true, submission_id: raced.id, success_message: published.success_message });
+      return json({ error: "Submission could not be recorded" }, 500);
+    }
+    return json({ ok: true, duplicate: false, submission_id: submissionId, success_message: published.success_message }, 201);
   }
 
   if (url.pathname === "/v1/contacts/upsert") {
@@ -5353,6 +5540,127 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       pipeline: pipelineCatalog,
       currentUser: { role: access.role },
     });
+  }
+
+  if (url.pathname === "/v1/admin/forms" && request.method === "GET") {
+    const rows = await env.DB.prepare(`SELECT f.*,(SELECT COUNT(*) FROM form_submissions s WHERE s.workspace_id=f.workspace_id AND s.form_id=f.id) submission_count,
+      (SELECT MAX(submitted_at) FROM form_submissions s WHERE s.workspace_id=f.workspace_id AND s.form_id=f.id) last_submission_at
+      FROM forms f WHERE f.workspace_id=? ORDER BY f.updated_at DESC,f.id`).bind(workspaceId).all<Record<string, unknown>>();
+    return json({ forms: rows.results.map((row) => ({ ...safeForm(row), submission_count: row.submission_count, last_submission_at: row.last_submission_at })) });
+  }
+  if (url.pathname === "/v1/admin/forms" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["name", "title"].includes(key))) return json({ error: "Form request contains unsupported fields" }, 400);
+    const name = optionalString(body.name, "name", 120) || "";
+    const title = optionalString(body.title, "title", 160) || "";
+    if (!name || !title) return json({ error: "name and title are required" }, 400);
+    const slugBase = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "form";
+    const formId = id("form"); const now = new Date().toISOString(); const changeId = id("chg");
+    const slug = `${slugBase}-${formId.slice(-8)}`;
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO forms(id,workspace_id,name,slug,status,title,description,fields,consent_text,success_message,published_version_id,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,'draft',?,'',?,?,'Thanks — your request was received.',NULL,1,?,?,?,?)`)
+        .bind(formId, workspaceId, name, slug, title, JSON.stringify(formFieldDefaults),
+          "I agree to receive email updates and marketing messages. Consent is optional and can be withdrawn at any time.", changeId, access.email, now, now),
+      await auditStatement(env, access, request, "form.created", "form", formId, null, { name, slug, title }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, formId).first<Record<string, unknown>>();
+    return json({ form: safeForm(created!) }, 201);
+  }
+  const adminFormMatch = url.pathname.match(/^\/v1\/admin\/forms\/(form_[a-f0-9]{32})$/);
+  if (adminFormMatch && request.method === "GET") {
+    const form = await env.DB.prepare("SELECT * FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, adminFormMatch[1]).first<Record<string, unknown>>();
+    if (!form) return json({ error: "Form not found" }, 404);
+    const versions = await env.DB.prepare(`SELECT id,version,published_by,published_at FROM form_versions WHERE workspace_id=? AND form_id=? ORDER BY version DESC`)
+      .bind(workspaceId, form.id).all();
+    return json({ form: safeForm(form), versions: versions.results });
+  }
+  if (adminFormMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["name", "title", "description", "fields", "consent_text", "success_message", "if_revision"].includes(key))) {
+      return json({ error: "Form update contains unsupported fields" }, 400);
+    }
+    const before = await env.DB.prepare("SELECT * FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, adminFormMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Form not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Form changed since it was loaded", code: "edit_conflict" }, 409);
+    const name = optionalString(body.name, "name", 120) || ""; const title = optionalString(body.title, "title", 160) || "";
+    const description = optionalString(body.description, "description", 1000) || "";
+    const consentText = optionalString(body.consent_text, "consent_text", 800) || "";
+    const successMessage = optionalString(body.success_message, "success_message", 300) || "";
+    if (!name || !title || !consentText || !successMessage) return json({ error: "name, title, consent_text, and success_message are required" }, 400);
+    const fields = validateFormFields(body.fields); const now = new Date().toISOString(); const changeId = id("chg");
+    const changed = await env.DB.batch([
+      env.DB.prepare(`UPDATE forms SET name=?,title=?,description=?,fields=?,consent_text=?,success_message=?,revision=revision+1,change_id=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND revision=?`).bind(name, title, description, JSON.stringify(fields), consentText, successMessage,
+        changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,'form.updated','form',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM forms WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeForm(before)), JSON.stringify({ name, title, description, fields }),
+          requestId(request), now, workspaceId, before.id, changeId),
+    ]);
+    if (!changed[0].meta.changes || !changed[1].meta.changes) return json({ error: "Form changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ form: safeForm(updated!) });
+  }
+  const formLifecycleMatch = url.pathname.match(/^\/v1\/admin\/forms\/(form_[a-f0-9]{32})\/(publish|revoke)$/);
+  if (formLifecycleMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["if_revision", "confirmation"].includes(key))) return json({ error: "Lifecycle request contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, formLifecycleMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Form not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Form changed since it was loaded", code: "edit_conflict" }, 409);
+    const action = formLifecycleMatch[2];
+    if (body.confirmation !== (action === "publish" ? "PUBLISH FORM" : "REVOKE FORM")) return json({ error: "Explicit lifecycle confirmation is required" }, 400);
+    if (action === "revoke" && before.status !== "published") return json({ error: "Only a published form can be revoked" }, 409);
+    validateFormFields(JSON.parse(String(before.fields)));
+    const now = new Date().toISOString(); const changeId = id("chg");
+    if (action === "publish") {
+      const versionRow = await env.DB.prepare("SELECT COALESCE(MAX(version),0)+1 version FROM form_versions WHERE workspace_id=? AND form_id=?")
+        .bind(workspaceId, before.id).first<{ version: number }>();
+      const versionId = id("fver");
+      let results;
+      try { results = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO form_versions(id,workspace_id,form_id,version,title,description,fields,consent_text,success_message,published_by,published_at)
+          SELECT ?,workspace_id,id,?,?,?,?,?,?,?,? FROM forms WHERE workspace_id=? AND id=? AND revision=?`)
+          .bind(versionId, Number(versionRow?.version || 1), before.title, before.description, before.fields, before.consent_text,
+            before.success_message, access.email, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`UPDATE forms SET status='published',published_version_id=?,revision=revision+1,change_id=?,updated_at=?
+          WHERE workspace_id=? AND id=? AND revision=?`).bind(versionId, changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'form.published','form',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM forms WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeForm(before)), JSON.stringify({ version_id: versionId, version: versionRow?.version }),
+            requestId(request), now, workspaceId, before.id, changeId),
+      ]); } catch {
+        const raced = await env.DB.prepare("SELECT revision FROM forms WHERE workspace_id=? AND id=?")
+          .bind(workspaceId, before.id).first<{ revision: number }>();
+        if (Number(raced?.revision) !== Number(before.revision)) return json({ error: "Form changed before it could be published", code: "edit_conflict" }, 409);
+        return json({ error: "Form could not be published" }, 500);
+      }
+      if (!results[0].meta.changes || !results[1].meta.changes || !results[2].meta.changes) return json({ error: "Form changed before it could be published", code: "edit_conflict" }, 409);
+    } else {
+      const results = await env.DB.batch([
+        env.DB.prepare(`UPDATE forms SET status='revoked',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
+          .bind(changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'form.revoked','form',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM forms WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeForm(before)), JSON.stringify({ status: "revoked" }),
+            requestId(request), now, workspaceId, before.id, changeId),
+      ]);
+      if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: "Form changed before it could be revoked", code: "edit_conflict" }, 409);
+    }
+    const updated = await env.DB.prepare("SELECT * FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ form: safeForm(updated!) });
+  }
+  const formSubmissionsMatch = url.pathname.match(/^\/v1\/admin\/forms\/(form_[a-f0-9]{32})\/submissions$/);
+  if (formSubmissionsMatch && request.method === "GET") {
+    const exists = await env.DB.prepare("SELECT id FROM forms WHERE workspace_id=? AND id=?").bind(workspaceId, formSubmissionsMatch[1]).first();
+    if (!exists) return json({ error: "Form not found" }, 404);
+    const rows = await env.DB.prepare(`SELECT * FROM form_submissions WHERE workspace_id=? AND form_id=? ORDER BY submitted_at DESC,id DESC LIMIT 100`)
+      .bind(workspaceId, formSubmissionsMatch[1]).all<Record<string, unknown>>();
+    return json({ submissions: rows.results.map(safeFormSubmission), truncated: rows.results.length === 100 });
   }
 
   const communicationConsentMatch = url.pathname.match(/^\/v1\/admin\/contacts\/([^/]+)\/communication-consent$/);
@@ -7044,6 +7352,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM conversation_messages WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM form_versions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM forms WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM visitor_intent_cases WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM visitor_events WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM audience_import_members WHERE workspace_id=?").bind(workspaceId),
@@ -12557,6 +12868,13 @@ const worker = {
       if (usesIndependentCredential(url.pathname)) {
         const independentlyAuthenticated = await api(request, env, url);
         if (independentlyAuthenticated) return independentlyAuthenticated;
+        if (/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) && request.method === "GET") {
+          const response = await handler.fetch(request, env, ctx);
+          const headers = new Headers(response.headers);
+          for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
+          headers.set("cache-control", "public, max-age=60, stale-while-revalidate=300");
+          return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+        }
       }
       request = await authenticatedRequest(request, env);
       const apiResponse = await api(request, env, url);

@@ -96,6 +96,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM conversation_messages"),
     env.DB.prepare("DELETE FROM conversation_threads"),
     env.DB.prepare("DELETE FROM communication_consents"),
+    env.DB.prepare("DELETE FROM form_submissions"),
+    env.DB.prepare("DELETE FROM form_versions"),
+    env.DB.prepare("DELETE FROM forms"),
     env.DB.prepare("DELETE FROM resend_deliveries"),
     env.DB.prepare("DELETE FROM resend_connections"),
     env.DB.prepare("DELETE FROM visitor_intent_cases"),
@@ -618,6 +621,79 @@ describe("authorization and transport security", () => {
     providerFetch.mockRestore();
   });
 
+  it("publishes immutable secure forms and records replay-safe consent-aware submissions", async () => {
+    expect((await call("/v1/admin/forms", { method: "POST", headers: { "oai-authenticated-user-email": "unknown@example.com", ...jsonHeaders },
+      body: JSON.stringify({ name: "Denied", title: "Denied" }) })).status).toBe(401);
+    const createdResponse = await call("/v1/admin/forms", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ name: "Strategy request", title: "Tell us where growth is stuck." }) });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json() as { form: { id: string; slug: string; revision: number; fields: unknown[] } }).form;
+    expect(created.fields).toHaveLength(6);
+    expect((await call(`/v1/public/forms/${created.slug}`)).status).toBe(404);
+    const fields = [
+      { key: "email", label: "Work email", type: "email", required: true },
+      { key: "first_name", label: "First name", type: "text", required: true },
+      { key: "message", label: "What is stuck?", type: "textarea", required: true },
+    ];
+    const updatedResponse = await call(`/v1/admin/forms/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      name: "Strategy request", title: "Tell us where growth is stuck.", description: "A human will review your context.", fields,
+      consent_text: "I agree to receive practical growth emails. I can unsubscribe at any time.", success_message: "We have your context.",
+      if_revision: created.revision,
+    }) });
+    expect(updatedResponse.status).toBe(200);
+    const updated = (await updatedResponse.json() as { form: { revision: number } }).form;
+    const publishRace = await Promise.all([1, 2].map(() => call(`/v1/admin/forms/${created.id}/publish`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ if_revision: updated.revision, confirmation: "PUBLISH FORM" }) })));
+    expect(publishRace.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM form_versions WHERE form_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='form.published' AND entity_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    const publicDefinition = await call(`/v1/public/forms/${created.slug}`);
+    expect(publicDefinition.status).toBe(200);
+    expect(await publicDefinition.json()).toMatchObject({ form: { version: 1, title: "Tell us where growth is stuck.", fields },
+      privacy: { email_marketing_optional: true } });
+
+    const submissionBody = { values: { email: "FORM.LEAD@example.com", first_name: "Form", message: "Pipeline handoff" },
+      privacy_accepted: true, email_consent: true, website: "", idempotency_key: "public-form-submit-1" };
+    expect((await call(`/v1/public/forms/${created.slug}/submissions`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...submissionBody, privacy_accepted: false }) })).status).toBe(400);
+    expect((await call(`/v1/public/forms/${created.slug}/submissions`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...submissionBody, website: "spam.example" }) })).status).toBe(202);
+    const submitted = await call(`/v1/public/forms/${created.slug}/submissions`, { method: "POST", headers: { ...jsonHeaders,
+      "cf-connecting-ip": "203.0.113.8", "user-agent": "Form test" }, body: JSON.stringify(submissionBody) });
+    expect(submitted.status).toBe(201);
+    const submissionId = (await submitted.json() as { submission_id: string }).submission_id;
+    expect((await call(`/v1/public/forms/${created.slug}/submissions`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify(submissionBody) })).status).toBe(200);
+    expect((await call(`/v1/public/forms/${created.slug}/submissions`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...submissionBody, values: { ...submissionBody.values, message: "Different payload" } }) })).status).toBe(409);
+    const contact = await env.DB.prepare("SELECT id,email,first_name,source_last FROM contacts WHERE email='form.lead@example.com'").first();
+    expect(contact).toMatchObject({ email: "form.lead@example.com", first_name: "Form", source_last: `form:${created.slug}` });
+    expect(await env.DB.prepare("SELECT status,basis,evidence FROM communication_consents WHERE contact_id=?").bind(contact!.id).first())
+      .toMatchObject({ status: "opted_in", basis: "express", evidence: expect.stringContaining("I agree to receive practical growth emails") });
+    expect(await env.DB.prepare("SELECT id,email_consent,ip_hash,user_agent FROM form_submissions WHERE id=?").bind(submissionId).first())
+      .toMatchObject({ id: submissionId, email_consent: 1, ip_hash: expect.stringMatching(/^[a-f0-9]{64}$/), user_agent: "Form test" });
+
+    const publishedDetail = await call(`/v1/admin/forms/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as {
+      form: { revision: number }; versions: unknown[] };
+    expect(publishedDetail.versions).toHaveLength(1);
+    const changedDraft = await call(`/v1/admin/forms/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      name: "Strategy request", title: "A newer unpublished headline", description: "Draft only", fields,
+      consent_text: "New draft consent language", success_message: "New draft success", if_revision: publishedDetail.form.revision,
+    }) });
+    expect(changedDraft.status).toBe(200);
+    expect(await call(`/v1/public/forms/${created.slug}`).then((response) => response.json())).toMatchObject({ form: {
+      version: 1, title: "Tell us where growth is stuck.", consent_text: "I agree to receive practical growth emails. I can unsubscribe at any time.",
+    } });
+    const changed = (await changedDraft.json() as { form: { revision: number } }).form;
+    expect((await call(`/v1/admin/forms/${created.id}/revoke`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ if_revision: changed.revision, confirmation: "REVOKE FORM" }) })).status).toBe(200);
+    expect((await call(`/v1/public/forms/${created.slug}`)).status).toBe(404);
+    expect((await call(`/v1/public/forms/${created.slug}/submissions`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...submissionBody, idempotency_key: "public-form-submit-2" }) })).status).toBe(404);
+    const ledger = await call(`/v1/admin/forms/${created.id}/submissions`, { headers: adminHeaders }).then((response) => response.json()) as { submissions: unknown[] };
+    expect(ledger.submissions).toHaveLength(1);
+  });
+
   it("governs typed contact fields as workspace metadata without discarding archived values", async () => {
     expect((await call("/v1/admin/custom-fields")).status).toBe(401);
     const createdResponse = await call("/v1/admin/custom-fields", {
@@ -1026,6 +1102,11 @@ describe("authorization and transport security", () => {
       ["/v1/admin/conversations", "GET"],
       ["/v1/admin/conversations/send", "POST"],
       [`/v1/admin/conversations/thread_${"a".repeat(32)}`, "GET, PATCH"],
+      ["/v1/admin/forms", "GET, POST"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}`, "GET, PATCH"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}/publish`, "POST"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}/revoke`, "POST"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}/submissions`, "GET"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}/merge-preview`, "POST"],
@@ -1095,6 +1176,10 @@ describe("authorization and transport security", () => {
       [`/v1/admin/contacts/con_${"a".repeat(32)}/communication-consent`, "PUT"],
       ["/v1/admin/conversations/send", "POST"],
       [`/v1/admin/conversations/thread_${"a".repeat(32)}`, "PATCH"],
+      ["/v1/admin/forms", "POST"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}`, "PATCH"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}/publish`, "POST"],
+      [`/v1/admin/forms/form_${"a".repeat(32)}/revoke`, "POST"],
       [`/v1/admin/contacts/con_${"a".repeat(32)}/notes`, "POST"],
       [`/v1/admin/notes/note_${"a".repeat(32)}`, "PATCH"],
       [`/v1/admin/notes/note_${"a".repeat(32)}`, "DELETE"],

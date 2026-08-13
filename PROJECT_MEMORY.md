@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged to `main` on 2026-08-13 as commit `0614ecb` through PR #1.
+Merged foundation and Conversations milestones to `main` on 2026-08-13; current main before the Forms branch is `6da9d89` through PR #7.
 
 Visible and functional:
 
@@ -39,13 +39,13 @@ Visible and functional:
 - Deterministic automations with versioned definitions, branches, retries, cancellation, traces, and action caps
 - Scoped agent credentials, MCP discovery/execution, work queues, proposals, human decisions, and audit history
 - Source credentials, webhooks, mailbox metadata, Resend transactional delivery, operations health, encrypted recovery, and launch readiness
+- Consent-aware Conversations with persisted email threads, explicit mailbox sync, delivery receipts, permission/suppression evidence, and replay-safe Resend sending
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
 Explicitly omitted from navigation:
 
-- Full conversations inbox and consent-aware composer
 - Public booking and calendar-provider sync
-- Sites/forms/surveys builder
+- Sites and surveys builders
 - Payments and reconciliation
 - Marketing/social publishing
 - Reputation management
@@ -56,9 +56,9 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Evidence at the baseline
 
-- GitHub PR #1: `verify`, CodeQL, and security checks passed from a clean Ubuntu checkout.
-- Local acceptance: 32 rendered UI/security tests.
-- Worker/D1 acceptance: all 186 tests across stress, extended, domain, auth, MCP, and platform shards.
+- GitHub PRs #1 and #7: `verify`, CodeQL, and security checks passed from clean Ubuntu checkouts.
+- Current local acceptance before Forms release: 33 rendered UI/security tests.
+- Worker/D1 acceptance: all 188 tests across stress, extended, domain, auth, MCP, and platform shards.
 - Edge ingestion: 25 tests.
 - TypeScript and ESLint: clean.
 - Dependency audit: zero known npm vulnerabilities at merge time.
@@ -77,21 +77,24 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 | Human-gated sensitive agent actions | Models propose; stored structured actions and policy decide what may execute. |
 | Functional-only navigation | The interface is a truthful capability contract. |
 | Pinned upstream provenance | Prevents an open-source reference from silently changing under local contracts. |
+| Immutable published form versions | A draft edit cannot retroactively change the fields or consent language a submitter saw. |
+| Separate privacy acknowledgement and optional marketing consent | A service request is not treated as marketing permission; opt-out suppression always wins. |
+| Public forms are write-only by slug | Visitors can fetch only the active published snapshot and submit bounded values; CRM data and draft history remain private. |
 
 ## Current workstream
 
-Branch: `agent/conversations-core`.
+Branch to publish: `agent/secure-forms`.
 
-Milestone completed locally: the first truthful Conversations vertical slice extends the existing mailbox metadata and Resend boundaries. It includes a workspace-scoped thread/message ledger, stable provider thread identity, contact association, consent and suppression policy, idempotent delivery state, an inbox UI, negative authorization tests, concurrency tests, and Edge desktop/mobile acceptance. Conversations may remain visible because its primary journey passed. Publish the branch and merge only through green CI.
+Milestone completed locally: secure Forms includes editable drafts, immutable published versions, globally shareable public slugs, public responsive rendering, required privacy acknowledgement, separately optional express-email consent, deterministic contact association, activity evidence, replay protection, per-form/IP throttling, honeypot handling, immediate revoke behavior, submission history, optimistic concurrency, atomic audits, and recovery schema version 26. Forms may remain visible because its primary admin-to-public journey passed. Publish and merge only through green CI.
 
-Evidence on 2026-08-13: `npm test` passed (32 rendered/runtime checks, all 187 worker tests across six shards, 25 ingestion tests); `npm run lint` passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Edge acceptance proved desktop navigation, consent-blocked send, zero console errors, and distinct 48px mobile navigation hit targets with no document overflow.
+Evidence on 2026-08-13: `npm test` passed (33 rendered/runtime checks, all 188 worker tests across six shards, 25 ingestion tests); `npm run lint` passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Edge acceptance proved draft creation, publish confirmation, unauthenticated public rendering, consent-aware submission, CRM ledger visibility, zero public console errors, and a 390px public layout without horizontal overflow. Concurrent publish testing proved one version and one audit winner.
 
 ## Next milestone sequence
 
-1. Secure forms: versioned form definitions, public write-only intake, consent evidence, publish/revoke lifecycle.
-2. Booking: availability rules, public booking, conflict prevention, cancellation/reschedule, provider adapter boundary.
-3. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
-5. Payments: provider-neutral ledger before any Stripe surface.
+1. Booking: availability rules, public booking, conflict prevention, cancellation/reschedule, provider adapter boundary.
+2. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
+3. Payments: provider-neutral ledger before any Stripe surface.
+4. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 
