@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, hosted-path Sites, and consent-aware Marketing email milestones to `main` on 2026-08-13; current main is `9a360d3` through PR #14.
+Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, hosted-path Sites, and consent-aware Marketing email milestones to `main` on 2026-08-13. The current product baseline is PR #14 at `9a360d3`; PR #15 records its post-merge truth without changing product behavior.
 
 Visible and functional:
 
@@ -97,7 +97,7 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Active branch: `agent/marketing-merge-memory`, a documentation-only post-merge truth update. Consent-aware Resend Marketing is proven on `main`; social marketing remains a separate omitted surface. The next product milestone must be independently oriented before implementation rather than inferred from HighLevel's navigation.
+Consent-aware Resend Marketing is proven on `main`; social marketing remains a separate omitted surface. The next product milestone must be independently oriented before implementation rather than inferred from HighLevel's navigation. If a later session is on a documentation-only branch, do not mistake that branch name for an active product workstream; use the repository state and this milestone sequence.
 
 Booking merged through PR #9, first-party Reporting through PR #10, and provider-neutral Payments through PR #11. Payments is now on `main` at merge commit `387054bc518a6b13a75ed15661e3f54528b95b9e`; it adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI.
 
