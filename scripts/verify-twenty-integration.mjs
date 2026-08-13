@@ -5,7 +5,9 @@ import { resolve } from "node:path";
 const projectRoot = resolve(import.meta.dirname, "..");
 const manifestPath = resolve(projectRoot, "docs", "TWENTY_INTEGRATION_MANIFEST.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-const referenceRoot = resolve(projectRoot, "..", "twenty-reference");
+const referenceRoot = process.env.TWENTY_REFERENCE_ROOT
+  ? resolve(projectRoot, process.env.TWENTY_REFERENCE_ROOT)
+  : resolve(projectRoot, "..", "twenty-reference");
 
 const git = (...args) => execFileSync("git", args, {
   cwd: referenceRoot,

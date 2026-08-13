@@ -37,6 +37,13 @@ interface FrameworkEnv extends Env {
 async function authenticatedRequest(request: Request, env: FrameworkEnv): Promise<Request> {
   if (env.ALLOW_INSECURE_LOCAL_AUTH === "true") {
     if (request.headers.get("oai-authenticated-user-email")) return request;
+    const pathname = new URL(request.url).pathname;
+    const acceptsHtml = !pathname.startsWith("/v1/") && pathname !== "/mcp" &&
+      request.headers.get("accept")?.includes("text/html") === true;
+    const isBrowserNavigation = request.headers.get("sec-fetch-mode") === "navigate" &&
+      request.headers.get("sec-fetch-dest") === "document";
+    const sameOriginBrowserRequest = request.headers.get("sec-fetch-site") === "same-origin";
+    if (!acceptsHtml && !isBrowserNavigation && !sameOriginBrowserRequest) return request;
     const local = new Request(request);
     local.headers.set("oai-authenticated-user-email", "owner@example.com");
     return local;
@@ -67,6 +74,17 @@ async function authenticatedRequest(request: Request, env: FrameworkEnv): Promis
     }
   }
   throw new ApiError(503, "Authentication is not configured");
+}
+
+function usesIndependentCredential(pathname: string): boolean {
+  return pathname === "/v1/health" ||
+    pathname === "/mcp" || pathname === "/v1/mcp" ||
+    pathname === "/v1/contacts/upsert" ||
+    pathname === "/v1/integrations/skool/events" ||
+    pathname === "/v1/internal/jobs/webhook-retries" ||
+    /^\/v1\/integrations\/audience-intake\/audiencelab\/vti_[a-f0-9]{64}$/.test(pathname) ||
+    /^\/v1\/integrations\/visitor-intent\/(audiencelab|rb2b)\/vti_[a-f0-9]{64}$/.test(pathname) ||
+    /^\/v1\/hooks\/[^/]+$/.test(pathname);
 }
 type Json = Record<string, unknown>;
 function isPlainObject(value: unknown): value is Json {
@@ -3235,10 +3253,30 @@ async function opportunityUpdateAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'opportunity.updated','opportunity',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM opportunities WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    WHERE changes()>0 AND EXISTS(SELECT 1 FROM opportunities WHERE workspace_id=? AND id=? AND updated_at=?)`)
     .bind(id("audit"), access.workspaceId, access.email, opportunityId,
       JSON.stringify(before), JSON.stringify(after), requestId(request), ipHash, expectedUpdatedAt,
       access.workspaceId, opportunityId, expectedUpdatedAt);
+}
+
+async function contactUpdateAuditStatement(
+  env: FrameworkEnv,
+  access: WorkspaceAccess,
+  request: Request,
+  contactId: string,
+  before: unknown,
+  after: unknown,
+  expectedUpdatedAt: string,
+) {
+  const ip = request.headers.get("cf-connecting-ip");
+  const ipHash = ip ? await sha256(ip) : null;
+  return env.DB.prepare(`INSERT INTO audit_log
+    (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
+    SELECT ?,?,'user',?,'contact.updated','contact',?,?,?,?,?,?
+    WHERE changes()>0 AND EXISTS(SELECT 1 FROM contacts WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    .bind(id("audit"), access.workspaceId, access.email, contactId,
+      JSON.stringify(before), JSON.stringify(after), requestId(request), ipHash, new Date().toISOString(),
+      access.workspaceId, contactId, expectedUpdatedAt);
 }
 
 async function taskMutationAuditStatement(
@@ -3256,10 +3294,10 @@ async function taskMutationAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,?,'task',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM tasks WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    WHERE (?=0 OR changes()>0) AND EXISTS(SELECT 1 FROM tasks WHERE workspace_id=? AND id=? AND updated_at=?)`)
     .bind(id("audit"), access.workspaceId, access.email, action, taskId,
       before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after),
-      requestId(request), ipHash, new Date().toISOString(),
+      requestId(request), ipHash, new Date().toISOString(), action === "task.updated" ? 1 : 0,
       access.workspaceId, taskId, expectedUpdatedAt);
 }
 
@@ -3278,10 +3316,10 @@ async function automationMutationAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,?,'automation',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM automation_rules WHERE workspace_id=? AND id=? AND updated_at=?)`)
+    WHERE (?=0 OR changes()>0) AND EXISTS(SELECT 1 FROM automation_rules WHERE workspace_id=? AND id=? AND updated_at=?)`)
     .bind(id("audit"), access.workspaceId, access.email, action, automationId,
       before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after),
-      requestId(request), ipHash, new Date().toISOString(),
+      requestId(request), ipHash, new Date().toISOString(), action === "automation.deleted" ? 0 : 1,
       access.workspaceId, automationId, expectedUpdatedAt);
 }
 
@@ -3291,7 +3329,8 @@ async function automationRunCancelAuditStatement(
   request: Request,
   runId: string,
   before: unknown,
-  finishedAt: string,
+  expectedStatus: "running" | "canceled",
+  finishedAt: string | null,
 ) {
   const ip = request.headers.get("cf-connecting-ip");
   const ipHash = ip ? await sha256(ip) : null;
@@ -3300,9 +3339,10 @@ async function automationRunCancelAuditStatement(
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'automation_run.canceled','automation_run',?,?,?,?,?,?
     WHERE EXISTS(SELECT 1 FROM automation_runs
-      WHERE workspace_id=? AND id=? AND status='canceled' AND finished_at=?)`)
+      WHERE workspace_id=? AND id=? AND status=? AND (? IS NULL OR finished_at=?))`)
     .bind(id("audit"), access.workspaceId, access.email, runId, JSON.stringify(before), JSON.stringify(after),
-      requestId(request), ipHash, finishedAt, access.workspaceId, runId, finishedAt);
+      requestId(request), ipHash, finishedAt || new Date().toISOString(), access.workspaceId, runId,
+      expectedStatus, finishedAt, finishedAt);
 }
 
 async function agentWorkItemRequeueAuditStatement(
@@ -3312,7 +3352,8 @@ async function agentWorkItemRequeueAuditStatement(
   workItemId: string,
   before: unknown,
   after: unknown,
-  updatedAt: string,
+  expectedUpdatedAt: string,
+  requeueAt: string,
 ) {
   const ip = request.headers.get("cf-connecting-ip");
   const ipHash = ip ? await sha256(ip) : null;
@@ -3320,9 +3361,10 @@ async function agentWorkItemRequeueAuditStatement(
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'agent.work_item_requeued','agent_work_item',?,?,?,?,?,?
     WHERE EXISTS(SELECT 1 FROM agent_work_items
-      WHERE workspace_id=? AND id=? AND status='queued' AND updated_at=?)`)
+      WHERE workspace_id=? AND id=? AND updated_at=?
+        AND (status='failed' OR (status='claimed' AND claim_expires_at<=?)))`)
     .bind(id("audit"), access.workspaceId, access.email, workItemId, JSON.stringify(before), JSON.stringify(after),
-      requestId(request), ipHash, updatedAt, access.workspaceId, workItemId, updatedAt);
+      requestId(request), ipHash, requeueAt, access.workspaceId, workItemId, expectedUpdatedAt, requeueAt);
 }
 
 async function agentWorkItemCancelAuditStatement(
@@ -3360,10 +3402,10 @@ async function sourceMutationAuditStatement(
   return env.DB.prepare(`INSERT INTO audit_log
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,?,'source',?,?,?,?,?,?
-    WHERE EXISTS(SELECT 1 FROM sources WHERE workspace_id=? AND id=? AND active=?)`)
+    WHERE (?=0 OR changes()>0) AND EXISTS(SELECT 1 FROM sources WHERE workspace_id=? AND id=? AND active=?)`)
     .bind(id("audit"), access.workspaceId, access.email, action, sourceId,
       before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after),
-      requestId(request), ipHash, new Date().toISOString(),
+      requestId(request), ipHash, new Date().toISOString(), action === "source.revoked" ? 1 : 0,
       access.workspaceId, sourceId, expectedActive);
 }
 
@@ -5692,14 +5734,23 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const changeId = id("chg");
     const after = { ...before, singular_label: singularLabel, plural_label: pluralLabel, description,
       fields: JSON.stringify(fields), active, revision: Number(before.revision) + 1, change_id: changeId, updated_at: now };
-    const results = await env.DB.batch([
-      env.DB.prepare(`UPDATE custom_object_definitions SET singular_label=?,plural_label=?,description=?,fields=?,
-        active=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
-        .bind(singularLabel, pluralLabel, description, JSON.stringify(fields), active, changeId, now,
-          workspaceId, before.id, before.revision),
-      await auditStatement(env, access, request, active ? "custom_object.updated" : "custom_object.archived",
-        "custom_object_definition", String(before.id), before, after),
-    ]);
+    let results: D1Result<unknown>[];
+    try {
+      results = await env.DB.batch([
+        await auditStatement(env, access, request, active ? "custom_object.updated" : "custom_object.archived",
+          "custom_object_definition", String(before.id), before, after),
+        env.DB.prepare(`UPDATE custom_object_definitions SET singular_label=?,plural_label=?,description=?,fields=?,
+          active=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
+          .bind(singularLabel, pluralLabel, description, JSON.stringify(fields), active, changeId, now,
+            workspaceId, before.id, before.revision),
+        env.DB.prepare("INSERT INTO atomic_mutation_guard(ok) SELECT 0 WHERE changes()=0"),
+      ]);
+    } catch (error) {
+      if (String(error).includes("atomic_mutation_must_win")) {
+        return json({ error: "Custom object changed since it was loaded", code: "edit_conflict" }, 409);
+      }
+      throw error;
+    }
     if (!results[0].meta.changes || !results[1].meta.changes) {
       return json({ error: "Custom object changed since it was loaded", code: "edit_conflict" }, 409);
     }
@@ -5817,7 +5868,10 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
           String(before.id), current, { ...next, revision: Number(before.revision) + 1, change_id: changeId, updated_at: now },
           { changeId }),
       ]);
-      if (!results[0].meta.changes || !results[1].meta.changes) {
+      if (!results[0].meta.changes) {
+        return json({ error: "View changed since it was loaded", code: "edit_conflict" }, 409);
+      }
+      if (!results[1].meta.changes) {
         return json({ error: "Custom-object view update failed and was rolled back", code: "view_update_failed" }, 500);
       }
     } catch {
@@ -8420,17 +8474,6 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid custom fields" }, 400); }
     }
     const updatedAt = new Date(Math.max(Date.now(), Date.parse(String(before.updated_at)) + 1)).toISOString();
-    const result = await env.DB.prepare(`UPDATE contacts SET
-      stage=COALESCE(?,stage),status=COALESCE(?,status),
-      owner=CASE WHEN ?=1 THEN ? ELSE owner END,
-      next_follow_up_at=CASE WHEN ?=1 THEN ? ELSE next_follow_up_at END,
-      custom_fields=CASE WHEN ?=1 THEN ? ELSE custom_fields END,
-      updated_at=? WHERE workspace_id=? AND id=? AND (? IS NULL OR updated_at=?)`)
-      .bind(stage, status, body.owner === undefined ? 0 : 1, owner,
-        body.next_follow_up_at === undefined ? 0 : 1, followUp,
-        body.custom_fields === undefined ? 0 : 1, nextCustomFields, updatedAt,
-        workspaceId, contactMatch[1], expectedUpdatedAt, expectedUpdatedAt).run();
-    if (!result.meta.changes) return json({ error: "Contact changed since it was loaded", code: "edit_conflict" }, 409);
     const after = {
       ...before, stage: stage || before.stage, status: status || before.status,
       owner: body.owner === undefined ? before.owner : owner,
@@ -8438,7 +8481,21 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       custom_fields: body.custom_fields === undefined ? before.custom_fields : nextCustomFields,
       updated_at: updatedAt,
     };
-    await audit(env, access, request, "contact.updated", "contact", contactMatch[1], before, after);
+    const originalUpdatedAt = expectedUpdatedAt || String(before.updated_at);
+    const result = await env.DB.batch([
+      env.DB.prepare(`UPDATE contacts SET
+        stage=COALESCE(?,stage),status=COALESCE(?,status),
+        owner=CASE WHEN ?=1 THEN ? ELSE owner END,
+        next_follow_up_at=CASE WHEN ?=1 THEN ? ELSE next_follow_up_at END,
+        custom_fields=CASE WHEN ?=1 THEN ? ELSE custom_fields END,
+        updated_at=? WHERE workspace_id=? AND id=? AND updated_at=?`)
+        .bind(stage, status, body.owner === undefined ? 0 : 1, owner,
+          body.next_follow_up_at === undefined ? 0 : 1, followUp,
+          body.custom_fields === undefined ? 0 : 1, nextCustomFields, updatedAt,
+          workspaceId, contactMatch[1], originalUpdatedAt),
+      await contactUpdateAuditStatement(env, access, request, contactMatch[1], before, after, updatedAt),
+    ]);
+    if (!result[0].meta.changes) return json({ error: "Contact changed since it was loaded", code: "edit_conflict" }, 409);
     if ((stage && stage !== before.stage) || (status && status !== before.status)) {
       await runContactAutomations(env, access, after, requestId(request), "contact.lifecycle_changed");
     }
@@ -9285,26 +9342,34 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const before = await env.DB.prepare(`SELECT * FROM agent_work_items WHERE workspace_id=? AND id=?`)
       .bind(workspaceId, agentWorkItemRequeueMatch[1]).first<Record<string, unknown>>();
     if (!before) return json({ error: "Agent work item not found" }, 404);
+    const requeueAt = new Date().toISOString();
     const expiredClaim = before.status === "claimed" && typeof before.claim_expires_at === "string" &&
-      before.claim_expires_at <= new Date().toISOString();
+      before.claim_expires_at <= requeueAt;
     if (before.status !== "failed" && !expiredClaim) {
       return json({ error: "Only failed or lease-expired agent work can be requeued", code: "work_item_not_requeueable" }, 409);
     }
     const updatedAt = new Date(Math.max(Date.now(), Date.parse(String(before.updated_at)) + 1)).toISOString();
     const after = { ...before, status: "queued", claimed_by_credential_id: null, claim_expires_at: null,
       result: null, completed_at: null, updated_at: updatedAt };
-    const requeued = await env.DB.batch([
-      env.DB.prepare(`UPDATE agent_work_items
-        SET status='queued',claimed_by_credential_id=NULL,claim_expires_at=NULL,result=NULL,completed_at=NULL,updated_at=?
-        WHERE workspace_id=? AND id=? AND updated_at=?
-          AND (status='failed' OR (status='claimed' AND claim_expires_at<=?))`)
-        .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, new Date().toISOString()),
-      await agentWorkItemRequeueAuditStatement(env, access, request,
-        agentWorkItemRequeueMatch[1], before, after, updatedAt),
-    ]);
-    if (!requeued[0].meta.changes) {
-      return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
+    let requeued: D1Result<unknown>[];
+    try {
+      requeued = await env.DB.batch([
+        await agentWorkItemRequeueAuditStatement(env, access, request,
+          agentWorkItemRequeueMatch[1], before, after, expectedUpdatedAt, requeueAt),
+        env.DB.prepare(`UPDATE agent_work_items
+          SET status='queued',claimed_by_credential_id=NULL,claim_expires_at=NULL,result=NULL,completed_at=NULL,updated_at=?
+          WHERE workspace_id=? AND id=? AND updated_at=?
+            AND (status='failed' OR (status='claimed' AND claim_expires_at<=?))`)
+          .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, requeueAt),
+        env.DB.prepare("INSERT INTO atomic_mutation_guard(ok) SELECT 0 WHERE changes()=0"),
+      ]);
+    } catch (error) {
+      if (String(error).includes("atomic_mutation_must_win")) {
+        return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
+      }
+      throw error;
     }
+    if (!requeued[1].meta.changes) return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
     return json({ ok: true, work_item: after });
   }
 
@@ -9349,13 +9414,22 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
         return json({ error: "This run is still inside its five-minute execution lease", code: "run_still_active" }, 409);
       }
       const finishedAt = new Date().toISOString();
-      const canceled = await env.DB.batch([
-        env.DB.prepare(`UPDATE automation_runs SET status='canceled',error=?,finished_at=?
-          WHERE workspace_id=? AND id=? AND status='running' AND started_at<=?`)
-          .bind(`Canceled as stale by ${access.email}`, finishedAt, workspaceId, runId, staleBefore),
-        await automationRunCancelAuditStatement(env, access, request, runId, before, finishedAt),
-      ]);
-      if (!canceled[0].meta.changes) return json({ error: "Automation run changed before cancellation", code: "run_conflict" }, 409);
+      let canceled: D1Result<unknown>[];
+      try {
+        canceled = await env.DB.batch([
+          await automationRunCancelAuditStatement(env, access, request, runId, before, "running", null),
+          env.DB.prepare(`UPDATE automation_runs SET status='canceled',error=?,finished_at=?
+            WHERE workspace_id=? AND id=? AND status='running' AND started_at<=?`)
+            .bind(`Canceled as stale by ${access.email}`, finishedAt, workspaceId, runId, staleBefore),
+          env.DB.prepare("INSERT INTO atomic_mutation_guard(ok) SELECT 0 WHERE changes()=0"),
+        ]);
+      } catch (error) {
+        if (String(error).includes("atomic_mutation_must_win")) {
+          return json({ error: "Automation run changed before cancellation", code: "run_conflict" }, 409);
+        }
+        throw error;
+      }
+      if (!canceled[1].meta.changes) return json({ error: "Automation run changed before cancellation", code: "run_conflict" }, 409);
       return json({ ok: true, run: { ...before, status: "canceled", error: `Canceled as stale by ${access.email}`, finished_at: finishedAt } });
     }
 
@@ -12022,10 +12096,10 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const source = await env.DB.prepare("SELECT id,slug,name,active FROM sources WHERE workspace_id=? AND id=?").bind(workspaceId, sourceMatch[1]).first<Record<string, unknown>>();
     if (!source) return json({ error: "Source not found" }, 404);
     const result = await env.DB.batch([
-      await sourceMutationAuditStatement(env, access, request, "source.revoked", sourceMatch[1], source, { ...source, active: 0 }, 1),
       env.DB.prepare("UPDATE sources SET active=0 WHERE workspace_id=? AND id=? AND active=1").bind(workspaceId, sourceMatch[1]),
+      await sourceMutationAuditStatement(env, access, request, "source.revoked", sourceMatch[1], source, { ...source, active: 0 }, 0),
     ]);
-    if (!result[1].meta.changes) return json({ error: "Source was already revoked" }, 409);
+    if (!result[0].meta.changes) return json({ error: "Source was already revoked" }, 409);
     return json({ ok: true });
   }
   return json({ error: "Not found" }, 404);
@@ -12047,6 +12121,10 @@ const worker = {
         });
       }
       if (url.pathname === "/favicon.ico" && request.method === "GET") return faviconResponse();
+      if (usesIndependentCredential(url.pathname)) {
+        const independentlyAuthenticated = await api(request, env, url);
+        if (independentlyAuthenticated) return independentlyAuthenticated;
+      }
       request = await authenticatedRequest(request, env);
       const apiResponse = await api(request, env, url);
       if (apiResponse) return apiResponse;

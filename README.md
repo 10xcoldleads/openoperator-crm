@@ -42,7 +42,9 @@ npx wrangler d1 migrations apply DB --local --config wrangler.test.jsonc
 npm run dev
 ```
 
-The default local owner is `owner@example.com`. Local development deliberately enables header-based test authentication; never enable `ALLOW_INSECURE_LOCAL_AUTH` in a deployed environment. Production requests are authenticated by a validated Cloudflare Access JWT.
+`npm run dev` builds and serves the same Worker/static-asset shape used in production, applying pending local D1 migrations first. The default local owner is `owner@example.com`. Local development deliberately enables header-based test authentication; never enable `ALLOW_INSECURE_LOCAL_AUTH` in a deployed environment. Production requests are authenticated by a validated Cloudflare Access JWT.
+
+`npm run dev:hot` uses Vinext's source-mode development server. It is faster and supports hot reload, but it is not the acceptance environment; platform and Windows path differences can make source assets behave differently from a built Worker.
 
 ## Verification
 

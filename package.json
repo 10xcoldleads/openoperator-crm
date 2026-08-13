@@ -7,7 +7,8 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "npm run build && wrangler d1 migrations apply DB --local --persist-to .wrangler/state --config dist/server/wrangler.json && wrangler dev --persist-to .wrangler/state --config dist/server/wrangler.json --var ALLOW_INSECURE_LOCAL_AUTH:true --var ADMIN_EMAILS:owner@example.com",
+    "dev:hot": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && npm run test:typecheck && npm run test:prepare && npm run test:twenty && node --test tests/rendered-html.test.mjs && node scripts/run-worker-tests.mjs && vitest run --config vitest.edge.config.ts",
@@ -20,7 +21,7 @@
     "ingest:types": "wrangler types --config ingest-worker/wrangler.jsonc ingest-worker/env.d.ts",
     "ingest:check": "wrangler deploy --config ingest-worker/wrangler.jsonc --dry-run",
     "ingest:deploy": "wrangler deploy --config ingest-worker/wrangler.jsonc",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .test-dist --ignore-pattern .next --ignore-pattern worker-configuration.d.ts --ignore-pattern ingest-worker/env.d.ts"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .test-dist --ignore-pattern .next --ignore-pattern twenty-reference --ignore-pattern worker-configuration.d.ts --ignore-pattern ingest-worker/env.d.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

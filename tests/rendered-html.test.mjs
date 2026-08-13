@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import test from "node:test";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 async function loadWorker() {
   const workerUrl = new URL("../.test-dist/server/index.js", import.meta.url);
@@ -10,6 +13,7 @@ async function loadWorker() {
 
 const env = {
   ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  ALLOW_INSECURE_LOCAL_AUTH: "true",
 };
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 
@@ -35,13 +39,13 @@ test("server-renders the OpenOperator CRM shell", async () => {
   assert.match(html, /<title>OpenOperator CRM<\/title>/);
   assert.match(html, /openoperator_asset_recovery/);
   assert.match(html, /aria-label="CRM workspace"/);
-  assert.match(html, /aria-label="Overview" title="Overview" aria-current="page"><i aria-hidden="true">⌂<\/i><span>Overview<\/span><small>01<\/small>/);
-  assert.match(html, /<span>Leads<\/span>/);
-  assert.match(html, /<span>Pipeline<\/span>/);
+  assert.match(html, /aria-label="Dashboard" title="Dashboard" aria-current="page"><i aria-hidden="true">D<\/i><span>Dashboard<\/span>/);
+  assert.match(html, /<span>Contacts<\/span>/);
+  assert.match(html, /<span>Opportunities<\/span>/);
   assert.match(html, /data-view="dashboard"/);
   assert.match(html, /id="lead-inbox" hidden/);
   assert.match(html, /id="opportunities" hidden/);
-  assert.match(html, /Private · workspace isolated/);
+  assert.match(html, /Isolated and audited/);
   assert.match(styles, /--chrome-surface:rgba\(255,255,255,.72\)/);
   assert.match(styles, /\.metrics article \{[\s\S]*backdrop-filter:blur\(22px\) saturate\(125%\)/);
   assert.match(styles, /Glass chrome v2: lead operating workspace/);
@@ -50,6 +54,127 @@ test("server-renders the OpenOperator CRM shell", async () => {
   assert.match(styles, /@media \(max-width:680px\) \{[\s\S]*\.sidebar \{[\s\S]*position:fixed;[\s\S]*inset:auto 10px 10px/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{ \*,\*::before,\*::after/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
+});
+
+test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
+  const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);
+  assert.doesNotMatch(config, /"run_worker_first": true/);
+});
+
+test("fails closed for HTML and platform APIs when production authentication is absent", async () => {
+  const worker = await loadWorker();
+  const productionLikeEnv = {
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  };
+  const [html, spoofedPlatform] = await Promise.all([
+    worker.fetch(new Request("http://localhost/", { headers: { accept: "text/html" } }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/v1/platform/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json", "oai-authenticated-user-email": "owner@example.com" },
+      body: JSON.stringify({ name: "Spoofed", slug: "spoofed", owner_email: "attacker@example.com" }),
+    }), productionLikeEnv, ctx),
+  ]);
+  assert.equal(html.status, 503);
+  assert.equal(spoofedPlatform.status, 503);
+  assert.deepEqual(await spoofedPlatform.json(), { error: "Authentication is not configured" });
+});
+
+test("accepts only cryptographically valid Cloudflare Access JWTs", async () => {
+  const worker = await loadWorker();
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = { ...(await exportJWK(publicKey)), kid: "access-test-key", alg: "RS256", use: "sig" };
+  const jwks = createServer((request, response) => {
+    if (request.url !== "/cdn-cgi/access/certs") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ keys: [jwk] }));
+  });
+  jwks.listen(0, "127.0.0.1");
+  await once(jwks, "listening");
+  const address = jwks.address();
+  assert.notEqual(address, null);
+  assert.equal(typeof address, "object");
+  const issuer = `http://127.0.0.1:${address.port}`;
+  const accessEnv = {
+    ASSETS: env.ASSETS,
+    TEAM_DOMAIN: issuer,
+    POLICY_AUD: "openoperator-test-policy",
+  };
+  const sign = (audience) => new SignJWT({ email: "Owner@Example.com", name: "Test Owner" })
+    .setProtectedHeader({ alg: "RS256", kid: jwk.kid })
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  try {
+    const [validToken, wrongAudienceToken] = await Promise.all([
+      sign(accessEnv.POLICY_AUD),
+      sign("wrong-policy"),
+    ]);
+    const [valid, wrongAudience] = await Promise.all([
+      worker.fetch(new Request("http://localhost/", {
+        headers: { accept: "text/html", "cf-access-jwt-assertion": validToken },
+      }), accessEnv, ctx),
+      worker.fetch(new Request("http://localhost/", {
+        headers: { accept: "text/html", "cf-access-jwt-assertion": wrongAudienceToken },
+      }), accessEnv, ctx),
+    ]);
+    assert.equal(valid.status, 200);
+    assert.equal(wrongAudience.status, 401);
+    assert.deepEqual(await wrongAudience.json(), { error: "Invalid Cloudflare Access authentication" });
+  } finally {
+    jwks.close();
+    await once(jwks, "close");
+  }
+});
+
+test("lets independently authenticated routes reach their own credential checks", async () => {
+  const worker = await loadWorker();
+  const productionLikeEnv = {
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  };
+  const [source, agent, scheduler] = await Promise.all([
+    worker.fetch(new Request("http://localhost/v1/contacts/upsert", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer invalid" },
+      body: "{}",
+    }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer invalid" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+    }), productionLikeEnv, ctx),
+    worker.fetch(new Request("http://localhost/v1/internal/jobs/webhook-retries", {
+      method: "POST",
+    }), productionLikeEnv, ctx),
+  ]);
+  assert.equal(source.status, 401);
+  assert.equal(agent.status, 401);
+  assert.equal(scheduler.status, 401);
+});
+
+test("does not turn the local browser convenience flag into a raw API authentication bypass", async () => {
+  const worker = await loadWorker();
+  const localEnv = {
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    ALLOW_INSECURE_LOCAL_AUTH: "true",
+  };
+  const [direct, htmlSpoof] = await Promise.all([
+    worker.fetch(new Request("http://localhost/v1/admin/dashboard"), localEnv, ctx),
+    worker.fetch(new Request("http://localhost/v1/admin/dashboard", {
+      headers: { accept: "text/html" },
+    }), localEnv, ctx),
+  ]);
+  assert.equal(direct.status, 401);
+  assert.equal(htmlSpoof.status, 401);
+  const navigation = await worker.fetch(new Request("http://localhost/", {
+    headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+  }), localEnv, ctx);
+  assert.equal(navigation.status, 200);
 });
 
 test("keeps the governed task lifecycle consistent in list and linked-record workspaces", async () => {
@@ -292,8 +417,10 @@ test("exposes a public health check without exposing CRM data", async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, service: "openoperator-crm", version: 1 });
 
-  const dashboard = await worker.fetch(new Request("http://localhost/v1/admin/dashboard"), env, ctx);
-  assert.equal(dashboard.status, 401);
+  const dashboard = await worker.fetch(new Request("http://localhost/v1/admin/dashboard", {
+    headers: { "oai-authenticated-user-email": "spoofed@example.com" },
+  }), { ASSETS: env.ASSETS }, ctx);
+  assert.equal(dashboard.status, 503);
 
   const robots = await worker.fetch(new Request("http://localhost/robots.txt"), env, ctx);
   assert.equal(robots.status, 200);
@@ -878,7 +1005,7 @@ test("uses restrained, reduced-motion-safe gradient emphasis on the homepage", a
     readFile(new URL("../app/components/GradientText.css", import.meta.url), "utf8"),
   ]);
   assert.match(dashboard, /activeView === "dashboard"[\s\S]*<GradientText/);
-  assert.match(dashboard, /pauseOnHover>Overview<\/GradientText>/);
+  assert.match(dashboard, /pauseOnHover>Dashboard<\/GradientText>/);
   assert.match(component, /Math\.max\(animationSpeed, 0\.5\)/);
   assert.match(component, /"--gradient-colors"/);
   assert.match(component, /pauseOnHover \? "pause-on-hover"/);

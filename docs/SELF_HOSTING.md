@@ -22,6 +22,7 @@ npm run dev
 ```
 
 Local D1 state is separate from production and remains under `.wrangler/state`; it must not be committed.
+The default development command deliberately builds before serving so local acceptance exercises the production asset layout. Use `npm run dev:hot` only for edit feedback, then verify every UI change with `npm run dev`.
 
 ## 3. Create production infrastructure
 

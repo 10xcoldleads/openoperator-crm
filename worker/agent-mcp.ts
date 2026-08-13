@@ -1553,7 +1553,7 @@ async function runWorkItemTool(env: AgentEnv, credential: AgentCredential, name:
         (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
         SELECT ?,?,'agent',?,'agent.work_item_claimed','agent_work_item',id,NULL,
           json_object('objective',objective,'claim_expires_at',claim_expires_at),?,?
-        FROM agent_work_items WHERE workspace_id=? AND claimed_by_credential_id=? AND status='claimed'
+        FROM agent_work_items WHERE changes()>0 AND workspace_id=? AND claimed_by_credential_id=? AND status='claimed'
           AND claim_expires_at=? AND updated_at=?`)
         .bind(newId("audit"), credential.workspace_id, credential.id, newId("mcp"), now,
           credential.workspace_id, credential.id, claimExpiresAt, now),
@@ -1591,7 +1591,7 @@ async function runWorkItemTool(env: AgentEnv, credential: AgentCredential, name:
         (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
         SELECT ?,?,'agent',?,'agent.work_item_renewed','agent_work_item',?,NULL,
           ?,?,?
-        WHERE EXISTS(SELECT 1 FROM agent_work_items WHERE id=? AND workspace_id=? AND status='claimed'
+        WHERE changes()>0 AND EXISTS(SELECT 1 FROM agent_work_items WHERE id=? AND workspace_id=? AND status='claimed'
           AND claimed_by_credential_id=? AND claim_expires_at=? AND updated_at=?)`)
         .bind(newId("audit"), credential.workspace_id, credential.id, workItemId,
           JSON.stringify({ claim_expires_at: renewedUntil }), newId("mcp"), now,
@@ -1611,7 +1611,7 @@ async function runWorkItemTool(env: AgentEnv, credential: AgentCredential, name:
       env.DB.prepare(`INSERT INTO audit_log
         (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
         SELECT ?,?,'agent',?,'agent.work_item_failed','agent_work_item',?,NULL,?,?,?
-        WHERE EXISTS(SELECT 1 FROM agent_work_items WHERE id=? AND workspace_id=? AND status='failed'
+        WHERE changes()>0 AND EXISTS(SELECT 1 FROM agent_work_items WHERE id=? AND workspace_id=? AND status='failed'
           AND claimed_by_credential_id=? AND completed_at=? AND updated_at=?)`)
         .bind(newId("audit"), credential.workspace_id, credential.id, workItemId, JSON.stringify(result), newId("mcp"), now,
           workItemId, credential.workspace_id, credential.id, now, now),
