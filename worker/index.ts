@@ -2607,7 +2607,7 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     let contactIds: unknown;
     try { contactIds = JSON.parse(String(row.contact_ids)); } catch { throw new ApiError(400, "Backup contains invalid marketing contacts"); }
     if (!Array.isArray(contactIds) || contactIds.length > 25 || new Set(contactIds).size !== contactIds.length ||
-      contactIds.some((value) => typeof value !== "string" || !/^ct_[a-f0-9]{32}$/.test(value)) ||
+      contactIds.some((value) => typeof value !== "string" || !/^con_[a-f0-9]{32}$/.test(value)) ||
       !["draft", "ready", "sending", "completed", "cancelled"].includes(String(row.status)) ||
       typeof row.name !== "string" || !row.name.trim() || String(row.name).length > 120 ||
       typeof row.subject !== "string" || !row.subject.trim() || String(row.subject).length > 200 ||
@@ -5352,7 +5352,9 @@ async function deliverMarketingRecipient(env: FrameworkEnv, access: WorkspaceAcc
     WHERE r.workspace_id=? AND r.campaign_id=? AND r.id=?`).bind(access.workspaceId, campaign.id, recipientId).first<Record<string, unknown>>();
   if (!recipient || recipient.status !== (retry ? "failed" : "queued")) return;
   const claimed = await env.DB.prepare(`UPDATE marketing_campaign_recipients SET status='sending',attempt_count=attempt_count+1,error=NULL,updated_at=?
-    WHERE id=? AND workspace_id=? AND status=? AND EXISTS(SELECT 1 FROM communication_consents cc
+    WHERE id=? AND workspace_id=? AND status=? AND EXISTS(SELECT 1 FROM marketing_campaigns campaign
+      WHERE campaign.id=marketing_campaign_recipients.campaign_id AND campaign.workspace_id=marketing_campaign_recipients.workspace_id AND campaign.status='sending')
+    AND EXISTS(SELECT 1 FROM communication_consents cc
       WHERE cc.workspace_id=marketing_campaign_recipients.workspace_id AND cc.contact_id=marketing_campaign_recipients.contact_id
         AND cc.channel='email' AND cc.status='opted_in' AND cc.basis='express')`)
     .bind(new Date().toISOString(), recipient.id, access.workspaceId, retry ? "failed" : "queued").run();
@@ -6842,7 +6844,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const bodyText = optionalString(body.body_text, "body_text", 10_000) || "";
     if (!name || !subject || !bodyText) return json({ error: "name, subject, and body_text are required" }, 400);
     if (!Array.isArray(body.contact_ids) || body.contact_ids.length > 25 || new Set(body.contact_ids).size !== body.contact_ids.length ||
-      body.contact_ids.some((value) => typeof value !== "string" || !/^ct_[a-f0-9]{32}$/.test(value))) return json({ error: "contact_ids must contain up to 25 unique Contact IDs" }, 400);
+      body.contact_ids.some((value) => typeof value !== "string" || !/^con_[a-f0-9]{32}$/.test(value))) return json({ error: "contact_ids must contain up to 25 unique Contact IDs" }, 400);
     const now = new Date().toISOString(); const changeId = id("chg");
     const results = await env.DB.batch([
       env.DB.prepare(`UPDATE marketing_campaigns SET name=?,subject=?,body_text=?,contact_ids=?,revision=revision+1,change_id=?,updated_at=?
@@ -6926,7 +6928,13 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
           .bind(id("audit"), workspaceId, access.email, retry ? "marketing.retry_started" : "marketing.launch_started", before.id, JSON.stringify(safeMarketingCampaign(before)), JSON.stringify({ recipient_count: recipients.results.length }), requestId(request), now, workspaceId, before.id, changeId),
       ]);
       if (!claimed[0].meta.changes || !claimed[1].meta.changes) return json({ error: "Campaign changed before sending began", code: "edit_conflict" }, 409);
-      await Promise.all(recipients.results.map((recipient) => deliverMarketingRecipient(env, access, request, connection, before, recipient.id, retry)));
+      // Claim in small bounded waves. A concurrent cancellation can change the campaign
+      // state between waves, preventing recipients that have not started from reaching
+      // the provider while still keeping the request duration bounded for 25 recipients.
+      for (let offset = 0; offset < recipients.results.length; offset += 3) {
+        await Promise.all(recipients.results.slice(offset, offset + 3)
+          .map((recipient) => deliverMarketingRecipient(env, access, request, connection, before, recipient.id, retry)));
+      }
       const finishedAt = new Date().toISOString(); const finishChangeId = id("chg");
       await env.DB.batch([
         env.DB.prepare("UPDATE marketing_campaigns SET status='completed',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND status='sending'")

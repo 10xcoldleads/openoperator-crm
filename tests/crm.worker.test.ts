@@ -930,9 +930,9 @@ describe("authorization and transport security", () => {
       VALUES('mem_marketing_member','ws_openoperator','marketing-member@example.com','member',1,?)`).bind(now).run();
     expect((await call("/v1/admin/marketing-campaigns", { method: "POST", headers: { "oai-authenticated-user-email": "marketing-member@example.com", ...jsonHeaders }, body: JSON.stringify({ name: "Denied" }) })).status).toBe(403);
     const contacts = [
-      { id: `ct_${"1".repeat(32)}`, email: "accepted@example.com", first: "Accepted", consent: "express" },
-      { id: `ct_${"2".repeat(32)}`, email: "withdrawn@example.com", first: "Withdrawn", consent: "express" },
-      { id: `ct_${"3".repeat(32)}`, email: "contractual@example.com", first: "Contractual", consent: "contractual" },
+      { id: `con_${"1".repeat(32)}`, email: "accepted@example.com", first: "Accepted", consent: "express" },
+      { id: `con_${"2".repeat(32)}`, email: "withdrawn@example.com", first: "Withdrawn", consent: "express" },
+      { id: `con_${"3".repeat(32)}`, email: "contractual@example.com", first: "Contractual", consent: "contractual" },
     ];
     for (const contact of contacts) {
       await env.DB.batch([
