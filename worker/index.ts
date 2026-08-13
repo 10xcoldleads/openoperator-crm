@@ -225,7 +225,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 29;
+const RECOVERY_SCHEMA_VERSION = 30;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -237,6 +237,7 @@ type RecoveryTable =
   | "communication_consents" | "conversation_threads" | "conversation_messages"
   | "forms" | "form_versions" | "form_submissions"
   | "surveys" | "survey_versions" | "survey_responses"
+  | "sites" | "site_versions"
   | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
   | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
@@ -277,6 +278,8 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   surveys: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "questions", "success_message", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   survey_versions: { columns: ["id", "workspace_id", "survey_id", "version", "title", "description", "questions", "success_message", "published_by", "published_at"] },
   survey_responses: { columns: ["id", "workspace_id", "survey_id", "survey_version_id", "idempotency_key", "answers", "privacy_accepted", "started_at", "submitted_at", "duration_seconds", "ip_hash", "user_agent"] },
+  sites: { columns: ["id", "workspace_id", "name", "slug", "status", "pages", "theme", "custom_domain", "domain_status", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  site_versions: { columns: ["id", "workspace_id", "site_id", "version", "pages", "theme", "published_by", "published_at"] },
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
@@ -2445,6 +2448,8 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     requireReference("survey_responses", row, "survey_id", "surveys");
     requireReference("survey_responses", row, "survey_version_id", "survey_versions");
   }
+  for (const row of tables.site_versions) requireReference("site_versions", row, "site_id", "sites");
+  for (const row of tables.sites) requireReference("sites", row, "published_version_id", "site_versions", true);
   for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
   for (const row of tables.booking_appointments) {
     requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
@@ -2553,6 +2558,24 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
       throw new ApiError(400, "Backup contains an invalid survey response");
     }
     surveyIdempotency.add(identity);
+  }
+  const siteSlugs = new Set<string>(); const siteVersionNumbers = new Set<string>();
+  for (const row of tables.sites) {
+    if (siteSlugs.has(String(row.slug)) || !/^[a-z0-9][a-z0-9-]{2,79}$/.test(String(row.slug)) ||
+      !["draft", "published", "revoked"].includes(String(row.status)) || !["disabled", "verification_pending"].includes(String(row.domain_status)) ||
+      row.custom_domain !== null || String(row.domain_status) !== "disabled" || !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid site");
+    }
+    siteSlugs.add(String(row.slug));
+    try { validateSitePages(JSON.parse(String(row.pages))); validateSiteTheme(JSON.parse(String(row.theme))); }
+    catch { throw new ApiError(400, "Backup contains invalid site pages or theme"); }
+  }
+  for (const row of tables.site_versions) {
+    const identity = `${row.site_id}:${row.version}`;
+    if (siteVersionNumbers.has(identity) || !Number.isInteger(row.version) || Number(row.version) < 1) throw new ApiError(400, "Backup contains an invalid site version");
+    siteVersionNumbers.add(identity);
+    try { validateSitePages(JSON.parse(String(row.pages))); validateSiteTheme(JSON.parse(String(row.theme))); }
+    catch { throw new ApiError(400, "Backup contains invalid site version content"); }
   }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
@@ -5191,6 +5214,69 @@ async function retainScheduledOperationsHealth(env: FrameworkEnv, observedAt = n
 
 type FormField = { key: "email" | "first_name" | "last_name" | "phone" | "company" | "message"; label: string; type: "email" | "text" | "tel" | "textarea"; required: boolean };
 type SurveyQuestion = { id: string; label: string; type: "short_text" | "long_text" | "email" | "single_choice" | "multi_choice" | "rating"; required: boolean; options: string[] };
+type SiteComponent =
+  | { id: string; type: "hero"; eyebrow: string; heading: string; body: string; cta_label: string; cta_href: string }
+  | { id: string; type: "text"; heading: string; body: string }
+  | { id: string; type: "features"; heading: string; items: Array<{ title: string; body: string }> }
+  | { id: string; type: "cta"; heading: string; body: string; cta_label: string; cta_href: string };
+type SitePage = { id: string; path: string; title: string; description: string; components: SiteComponent[] };
+type SiteTheme = { background: string; surface: string; text: string; accent: string; font: "system" | "serif" | "mono" };
+function siteText(value: unknown, field: string, max: number) {
+  if (typeof value !== "string" || value.trim().length > max) throw new ApiError(400, `${field} is invalid`);
+  return value.trim();
+}
+function siteHref(value: unknown) {
+  const href = siteText(value, "component link", 500);
+  if (!href || href.startsWith("/") && !href.startsWith("//")) return href;
+  let parsed: URL; try { parsed = new URL(href); } catch { throw new ApiError(400, "component link is invalid"); }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new ApiError(400, "component link must be a relative path or HTTPS URL");
+  return href;
+}
+function validateSitePages(value: unknown): SitePage[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 10) throw new ApiError(400, "pages must contain 1 to 10 pages");
+  const paths = new Set<string>(); const pageIds = new Set<string>();
+  return value.map((raw) => {
+    if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["id", "path", "title", "description", "components"].includes(key))) throw new ApiError(400, "A site page is malformed");
+    const pageId = siteText(raw.id, "page id", 40); const path = siteText(raw.path, "page path", 60);
+    if (!/^[a-z][a-z0-9_]{2,39}$/.test(pageId) || pageIds.has(pageId) || !/^(?:\/|\/[a-z0-9][a-z0-9-]{0,58})$/.test(path) || paths.has(path)) throw new ApiError(400, "A site page id or path is invalid or duplicated");
+    if (!Array.isArray(raw.components) || raw.components.length < 1 || raw.components.length > 20) throw new ApiError(400, "Each page must contain 1 to 20 components");
+    const componentIds = new Set<string>();
+    const components = raw.components.map((component): SiteComponent => {
+      if (!isPlainObject(component)) throw new ApiError(400, "A site component is malformed");
+      const componentId = siteText(component.id, "component id", 40); const type = siteText(component.type, "component type", 20);
+      if (!/^[a-z][a-z0-9_]{2,39}$/.test(componentId) || componentIds.has(componentId) || !["hero", "text", "features", "cta"].includes(type)) throw new ApiError(400, "A site component id or type is invalid or duplicated");
+      componentIds.add(componentId);
+      if (type === "text") {
+        if (Object.keys(component).some((key) => !["id", "type", "heading", "body"].includes(key))) throw new ApiError(400, "Text component contains unsupported fields");
+        return { id: componentId, type, heading: siteText(component.heading, "heading", 160), body: siteText(component.body, "body", 4000) };
+      }
+      if (type === "features") {
+        if (Object.keys(component).some((key) => !["id", "type", "heading", "items"].includes(key)) || !Array.isArray(component.items) || component.items.length < 2 || component.items.length > 6) throw new ApiError(400, "Features component is invalid");
+        return { id: componentId, type, heading: siteText(component.heading, "heading", 160), items: component.items.map((item) => {
+          if (!isPlainObject(item) || Object.keys(item).some((key) => !["title", "body"].includes(key))) throw new ApiError(400, "Feature is invalid");
+          return { title: siteText(item.title, "feature title", 100), body: siteText(item.body, "feature body", 500) };
+        }) };
+      }
+      if (Object.keys(component).some((key) => !["id", "type", "eyebrow", "heading", "body", "cta_label", "cta_href"].includes(key))) throw new ApiError(400, "Action component contains unsupported fields");
+      const shared = { id: componentId, heading: siteText(component.heading, "heading", 160), body: siteText(component.body, "body", 1000), cta_label: siteText(component.cta_label, "CTA label", 80), cta_href: siteHref(component.cta_href) };
+      return type === "hero" ? { ...shared, type, eyebrow: siteText(component.eyebrow, "eyebrow", 80) } : { ...shared, type: "cta" };
+    });
+    pageIds.add(pageId); paths.add(path);
+    return { id: pageId, path, title: siteText(raw.title, "page title", 160), description: siteText(raw.description, "page description", 300), components };
+  });
+}
+function validateSiteTheme(value: unknown): SiteTheme {
+  if (!isPlainObject(value) || Object.keys(value).some((key) => !["background", "surface", "text", "accent", "font"].includes(key))) throw new ApiError(400, "Site theme is malformed");
+  const color = (key: string) => { const result = siteText(value[key], key, 7); if (!/^#[0-9a-f]{6}$/i.test(result)) throw new ApiError(400, `${key} must be a six-digit hex color`); return result.toLowerCase(); };
+  const font = siteText(value.font, "font", 10) as SiteTheme["font"];
+  if (!["system", "serif", "mono"].includes(font)) throw new ApiError(400, "font is invalid");
+  return { background: color("background"), surface: color("surface"), text: color("text"), accent: color("accent"), font };
+}
+function safeSite(row: Record<string, unknown>) {
+  return { id: row.id, name: row.name, slug: row.slug, status: row.status, pages: JSON.parse(String(row.pages)), theme: JSON.parse(String(row.theme)),
+    custom_domain: row.custom_domain, domain_status: row.domain_status, published_version_id: row.published_version_id, revision: row.revision,
+    created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at, public_path: row.status === "published" ? `/site/${row.slug}` : null };
+}
 function validateSurveyQuestions(value: unknown): SurveyQuestion[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 30) throw new ApiError(400, "questions must contain 1 to 30 supported questions");
   const seen = new Set<string>();
@@ -8238,6 +8324,8 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM survey_responses WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM site_versions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM sites WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM survey_versions WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM surveys WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM payment_ledger_entries WHERE workspace_id=? AND parent_entry_id IS NOT NULL").bind(workspaceId),

@@ -118,6 +118,8 @@ Survey remote evidence: PR #12 clean Linux `verify` passed in 4m36s on the final
 
 Sites orientation on active branch `agent/sites`: the first release is an explicitly hosted-path builder, not a custom-domain product. It needs workspace-scoped sites, ordered pages, immutable publication versions, bounded component schemas, SEO metadata, public rendering, admin-only revision/audit lifecycle, recovery contracts, responsive proof, and immediate revoke. Domain fields may be modeled only as inactive/verification-pending metadata until authoritative DNS ownership, collision prevention, TLS/route provisioning, and removal are all implemented and tested. Arbitrary HTML/JavaScript, uploads, analytics injection, custom CSS, commerce, blogs, memberships, and custom domains remain false for the first slice.
 
+Sites foundation: migration `0053_sites_core.sql`, Drizzle models, and recovery schema version 30 now define workspace-scoped site drafts and immutable publication snapshots. A site contains 1–10 uniquely pathed pages; each page contains 1–20 ordered, stable-ID components from a closed `hero`, `text`, `features`, or `cta` schema. Text, item counts, links, page paths, theme colors, and font choices are bounded. Links accept only same-site relative paths or credential-free HTTPS URLs. Custom domains are forced to `null`/`disabled` by recovery validation because routing and ownership proof are not implemented. TypeScript passes this foundation; APIs, UI, lifecycle tests, and browser proof remain pending, so Sites remains omitted from navigation.
+
 ## Next milestone sequence
 
 1. Surveys: separate versioned publish/respond lifecycle and response evidence; do not relabel Forms.
