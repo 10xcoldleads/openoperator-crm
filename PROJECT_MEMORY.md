@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, and local-first Booking milestones to `main` on 2026-08-13; current main is `ed7a1e1` through PR #9.
+Merged foundation, Conversations, secure Forms, local-first Booking, and truthful first-party Reporting milestones to `main` on 2026-08-13; current main is `3a8e123` through PR #10.
 
 Visible and functional:
 
@@ -89,11 +89,11 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Branch to publish: `agent/first-party-reporting`.
+Next branch: `agent/payment-ledger`.
 
-Booking merged through PR #9 after `verify`, CodeQL, and GitGuardian passed. First-party Reporting is completed locally: 7/30/90-day UTC cohorts, daily record arrival, contact lifecycle distribution, first-touch source grouping, permission-aware opportunity snapshots, pipeline-stage distribution, and currency-separated value registers. The surface explicitly labels snapshot data as non-historical and source grouping as non-causal. Publish and merge only through green CI.
+Booking merged through PR #9. First-party Reporting merged through PR #10 after `verify`, CodeQL, and GitGuardian passed. Next milestone: provider-neutral Payments ledger before any Stripe/provider surface. It must model immutable money events, idempotent ingestion, refunds/disputes as append-only adjustments, currency-separated balances, optimistic/audited operator actions, workspace isolation, and a real ledger UI before appearing in navigation.
 
-Reporting evidence on 2026-08-13: `npm test` passed (35 rendered/runtime checks, all 190 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Aggregation tests prove bounded range rejection, cohort exclusion, lifecycle/source grouping, currency separation, and opportunity-permission redaction. Edge proved filter changes, methodology disclosures, zero application console errors, and a 390px body with exact 390px width while the wide source register scrolls internally. Clean Linux CI and PR merge remain required.
+Reporting evidence on 2026-08-13: `npm test` passed (35 rendered/runtime checks, all 190 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; npm audit reported zero vulnerabilities. Aggregation tests prove bounded range rejection, cohort exclusion, lifecycle/source grouping, currency separation, and opportunity-permission redaction. Edge proved filter changes, methodology disclosures, zero application console errors, and 390px body containment with an internally scrolling source register. PR #10 clean Linux `verify`, CodeQL, and GitGuardian passed before merge.
 
 ## Next milestone sequence
 
