@@ -19,6 +19,7 @@ import type {
 } from "./VisualAutomationBuilder";
 import { parseAutomationTrace } from "./automationTrace";
 import GradientText from "./components/GradientText";
+import ConversationsWorkspace from "./ConversationsWorkspace";
 
 const VisualAutomationBuilder = lazy(() => import("./VisualAutomationBuilder"));
 
@@ -717,7 +718,7 @@ type CommandEntry =
   | { id: string; kind: "contact"; label: string; description: string; record: Contact }
   | { id: string; kind: "company"; label: string; description: string; record: Company }
   | { id: string; kind: "opportunity"; label: string; description: string; record: Opportunity };
-type WorkspaceView = "dashboard" | "leads" | "pipeline" | "tasks" | "agent" | "automations" | "integrations" | "settings";
+type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "tasks" | "agent" | "automations" | "integrations" | "settings";
 type IntegrationDomain = "mailboxes" | "agents" | "sources" | "webhooks";
 type IntegrationCatalogView = "catalog" | "installed";
 type LeadView = "inbox" | "contacts" | "companies" | "visitors";
@@ -728,6 +729,7 @@ const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; gr
   { id: "dashboard", label: "Dashboard", icon: "D", group: "Workspace" },
   { id: "leads", label: "Contacts", icon: "C", group: "Workspace" },
   { id: "pipeline", label: "Opportunities", icon: "O", group: "Workspace" },
+  { id: "conversations", label: "Conversations", icon: "M", group: "Workspace" },
   { id: "tasks", label: "Calendar & tasks", icon: "T", group: "Workspace" },
   { id: "agent", label: "Agent work", icon: "A", group: "Intelligence" },
   { id: "automations", label: "Automations", icon: "W", group: "Intelligence" },
@@ -4817,6 +4819,7 @@ export default function CrmDashboard() {
             view === "companies" ? `Companies (${control?.companies.length ?? 0})` : `Visitor Intent (${visitorIntent?.counts.new ?? 0})`}
         </button>)}
       </nav>}
+      <ConversationsWorkspace active={activeView === "conversations"}/>
       <section className="metrics" hidden={activeView !== "dashboard"}>
         <article><i aria-hidden="true">◎</i><span>TOTAL CONTACTS</span><strong>{data?.metrics.contacts ?? "—"}</strong><small>Across connected sources</small></article>
         <article><i aria-hidden="true">↗</i><span>CUSTOMERS</span><strong>{data?.metrics.customers ?? "—"}</strong><small>Paying relationships</small></article>

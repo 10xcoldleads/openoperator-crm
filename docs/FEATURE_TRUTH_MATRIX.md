@@ -12,7 +12,7 @@ This matrix is the release contract for the open-source HighLevel-style workspac
 | Automations | Versioned deterministic workflow builder, validation, activation, run history, repair paths | Visible | Campaign messaging remains omitted until provider and consent policy exist |
 | App connections | Governed sources, webhooks, mailboxes, agent credentials, health checks, revoke/rotate paths | Visible | Provider-specific setup wizards are added one tested adapter at a time |
 | Settings | Workspace access, roles, fields, objects, layouts, readiness, operations health, recovery | Visible | Domain and billing controls remain omitted |
-| Conversations | No complete channel adapter, thread store, delivery receipt model, or consent-aware composer | Omitted | Build inbound/outbound email first with idempotency, opt-out policy, and delivery receipts |
+| Conversations | Workspace-scoped email threads/messages, explicit Gmail/Outlook metadata sync, contact permission/suppression evidence, replay-safe Resend delivery, receipts, lifecycle controls, and responsive browser acceptance | Visible | Add incremental provider adapters only after equivalent consent, idempotency, authorization, and failure-path evidence |
 | Sites, forms, surveys | Secure source intake exists, but no page/form builder or publish lifecycle | Omitted | Build a form intake slice before exposing a Sites menu |
 | Payments | No provider connection, ledger, refund, or reconciliation model | Omitted | Add only after a provider-neutral ledger and Stripe adapter are tested |
 | Marketing and social | No publish scheduler, provider authorization, or post lifecycle | Omitted | Research and implement as a separate bounded module |

@@ -93,6 +93,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM agent_runs"),
     env.DB.prepare("DELETE FROM automation_runs"),
     env.DB.prepare("DELETE FROM mailbox_connections"),
+    env.DB.prepare("DELETE FROM conversation_messages"),
+    env.DB.prepare("DELETE FROM conversation_threads"),
+    env.DB.prepare("DELETE FROM communication_consents"),
     env.DB.prepare("DELETE FROM resend_deliveries"),
     env.DB.prepare("DELETE FROM resend_connections"),
     env.DB.prepare("DELETE FROM visitor_intent_cases"),
@@ -492,6 +495,127 @@ describe("authorization and transport security", () => {
       method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
     })).status).toBe(409);
     outboundFetch.mockRestore();
+  });
+
+  it("persists consent-governed email conversations with replay-safe delivery and thread lifecycle", async () => {
+    expect((await call("/v1/admin/conversations")).status).toBe(401);
+    const source = await createSource("conversation-core");
+    const contactResponse = await ingest(source.api_key, {
+      contact: { email: "conversation@example.com", first_name: "Conversation", last_name: "Lead" },
+    });
+    const contact = (await contactResponse.json() as { contact: { id: string } }).contact;
+    const sendBody = {
+      contact_id: contact.id, subject: "Your requested details", text: "Here are the details you requested.",
+      purpose: "transactional", idempotency_key: "conversation-send-1", confirmation: "SEND EMAIL",
+    };
+    expect((await call("/v1/admin/conversations/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
+    })).status).toBe(409);
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_conversation_member','ws_openoperator','conversation-member@example.com','member',1,?)`)
+      .bind(new Date().toISOString()).run();
+    expect((await call(`/v1/admin/contacts/${contact.id}/communication-consent`, {
+      method: "PUT", headers: { "oai-authenticated-user-email": "conversation-member@example.com", ...jsonHeaders },
+      body: JSON.stringify({ status: "opted_in", basis: "express", evidence: "Form checkbox", captured_at: new Date().toISOString() }),
+    })).status).toBe(403);
+    expect((await call(`/v1/admin/contacts/${contact.id}/communication-consent`, {
+      method: "PUT", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        status: "opted_out", basis: "express", evidence: "Invalid pairing", captured_at: new Date().toISOString(),
+      }),
+    })).status).toBe(400);
+    const capturedAt = new Date(Date.now() - 60_000).toISOString();
+    const consentCreated = await call(`/v1/admin/contacts/${contact.id}/communication-consent`, {
+      method: "PUT", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        status: "opted_in", basis: "contractual", evidence: "Customer requested account access by email",
+        captured_at: capturedAt,
+      }),
+    });
+    expect(consentCreated.status).toBe(201);
+    expect(await consentCreated.json()).toMatchObject({ consent: { status: "opted_in", basis: "contractual", revision: 1 } });
+    expect(await call(`/v1/admin/contacts/${contact.id}/communication-consent`, { headers: adminHeaders })
+      .then((response) => response.json())).toMatchObject({ consent: {
+        status: "opted_in", basis: "contractual", evidence: "Customer requested account access by email", revision: 1,
+      } });
+    expect((await call("/v1/admin/conversations/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...sendBody, purpose: "marketing" }),
+    })).status).toBe(409);
+
+    const rawKey = "re_conversation_secret_1234567890";
+    const connectionResponse = await call("/v1/admin/resend-connection", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        label: "Conversation sender", api_key: rawKey, from_email: "hello@openoperator.ai", from_name: "OpenOperator",
+      }),
+    });
+    const connection = (await connectionResponse.json() as { connection: { revision: number } }).connection;
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({ id: "provider_conversation_verify_1" }, { status: 200 }));
+    const verifyResponse = await call("/v1/admin/resend-connection/verify", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        expected_revision: connection.revision, idempotency_key: "conversation-verify-1",
+      }),
+    });
+    expect({ status: verifyResponse.status, body: await verifyResponse.clone().json() }).toEqual({ status: 201, body: expect.anything() });
+    providerFetch.mockImplementation(async () => Response.json({ id: "provider_conversation_send_1" }, { status: 200 }));
+    const sent = await call("/v1/admin/conversations/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
+    });
+    expect(sent.status).toBe(201);
+    const sentBody = await sent.json() as { thread_id: string; message: { id: string; status: string } };
+    expect(sentBody.message.status).toBe("sent");
+    expect(providerFetch).toHaveBeenCalledTimes(2);
+    const replay = await call("/v1/admin/conversations/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ ok: true, replayed: true, message: { id: sentBody.message.id } });
+    expect(providerFetch).toHaveBeenCalledTimes(2);
+    expect((await call("/v1/admin/conversations/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...sendBody, subject: "Changed" }),
+    })).status).toBe(409);
+
+    const listed = await call("/v1/admin/conversations", { headers: adminHeaders }).then((response) => response.json()) as {
+      threads: Array<{ id: string; contact_name: string; consent: { status: string } }>;
+    };
+    expect(listed.threads).toEqual([expect.objectContaining({
+      id: sentBody.thread_id, contact_name: "Conversation Lead", consent: expect.objectContaining({ status: "opted_in" }),
+    })]);
+    const detail = await call(`/v1/admin/conversations/${sentBody.thread_id}`, { headers: adminHeaders })
+      .then((response) => response.json()) as { thread: { revision: number }; messages: Array<{ id: string; body_text: string }> };
+    expect(detail.messages).toEqual([expect.objectContaining({
+      id: sentBody.message.id, body_text: "Here are the details you requested.",
+    })]);
+    const closed = await call(`/v1/admin/conversations/${sentBody.thread_id}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        status: "closed", mark_read: true, if_revision: detail.thread.revision,
+      }),
+    });
+    expect(closed.status).toBe(200);
+    expect((await call(`/v1/admin/conversations/${sentBody.thread_id}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        status: "open", if_revision: detail.thread.revision,
+      }),
+    })).status).toBe(409);
+    expect((await env.DB.prepare(`SELECT COUNT(*) total FROM audit_log WHERE action='conversation.updated'
+      AND entity_id=?`).bind(sentBody.thread_id).first<{ total: number }>())?.total).toBe(1);
+
+    const consentRaces = await Promise.all([1, 2].map(() => call(`/v1/admin/contacts/${contact.id}/communication-consent`, {
+      method: "PUT", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        status: "opted_out", basis: "manual_suppression", evidence: "Contact requested no further email",
+        captured_at: new Date().toISOString(), if_revision: 1,
+      }),
+    })));
+    expect(consentRaces.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect((await call("/v1/admin/conversations/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        ...sendBody, idempotency_key: "conversation-after-optout-1",
+      }),
+    })).status).toBe(409);
+    expect((await env.DB.prepare(`SELECT COUNT(*) total FROM audit_log WHERE action='communication_consent.updated'
+      AND entity_id=(SELECT id FROM communication_consents WHERE contact_id=?)`).bind(contact.id)
+      .first<{ total: number }>())?.total).toBe(2);
+    expect((await env.DB.prepare(`SELECT COUNT(*) total FROM audit_log WHERE action='conversation.message_sent'
+      AND entity_id=?`).bind(sentBody.message.id).first<{ total: number }>())?.total).toBe(1);
+    providerFetch.mockRestore();
   });
 
   it("governs typed contact fields as workspace metadata without discarding archived values", async () => {
@@ -898,6 +1022,10 @@ describe("authorization and transport security", () => {
       [`/v1/admin/contacts/con_${"a".repeat(32)}/notes`, "POST"],
       [`/v1/admin/notes/note_${"a".repeat(32)}`, "PATCH, DELETE"],
       [`/v1/admin/contacts/con_${"a".repeat(32)}`, "GET, PATCH, DELETE"],
+      [`/v1/admin/contacts/con_${"a".repeat(32)}/communication-consent`, "GET, PUT"],
+      ["/v1/admin/conversations", "GET"],
+      ["/v1/admin/conversations/send", "POST"],
+      [`/v1/admin/conversations/thread_${"a".repeat(32)}`, "GET, PATCH"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}/merge-preview`, "POST"],
@@ -946,6 +1074,7 @@ describe("authorization and transport security", () => {
       [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}/reconnect`, "POST"],
       [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}/revoke`, "POST"],
       [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}/conversations`, "GET"],
+      [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}/sync-conversations`, "POST"],
       ["/v1/admin/resend-connection", "GET, POST, DELETE"],
       ["/v1/admin/resend-connection/verify", "POST"],
       ["/v1/admin/resend-connection/send", "POST"],
@@ -963,6 +1092,9 @@ describe("authorization and transport security", () => {
       ["/v1/admin/contacts", "POST"],
       ["/v1/admin/contacts/bulk", "PATCH"],
       [`/v1/admin/contacts/con_${"a".repeat(32)}`, "PATCH"],
+      [`/v1/admin/contacts/con_${"a".repeat(32)}/communication-consent`, "PUT"],
+      ["/v1/admin/conversations/send", "POST"],
+      [`/v1/admin/conversations/thread_${"a".repeat(32)}`, "PATCH"],
       [`/v1/admin/contacts/con_${"a".repeat(32)}/notes`, "POST"],
       [`/v1/admin/notes/note_${"a".repeat(32)}`, "PATCH"],
       [`/v1/admin/notes/note_${"a".repeat(32)}`, "DELETE"],
@@ -1007,6 +1139,7 @@ describe("authorization and transport security", () => {
       [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}`, "PATCH"],
       [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}`, "DELETE"],
       [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}/revoke`, "POST"],
+      [`/v1/admin/mailbox-connections/mbx_${"a".repeat(32)}/sync-conversations`, "POST"],
       ["/v1/admin/resend-connection", "POST"],
       ["/v1/admin/resend-connection", "DELETE"],
       ["/v1/admin/resend-connection/verify", "POST"],
@@ -4705,8 +4838,11 @@ describe("private mailbox connection control plane", () => {
     }
   });
 
-  it("[extended] returns bounded live mailbox metadata without persisting message content", async () => {
+  it("[extended] previews mailbox metadata ephemerally and persists only explicit replay-safe conversation sync", async () => {
     const now = new Date().toISOString();
+    const source = await createSource("mailbox-conversation-sync");
+    const adaContact = await ingest(source.api_key, { contact: { email: "ada@example.com", first_name: "Ada" } })
+      .then((response) => response.json()) as { contact: { id: string } };
     const gmailId = `mbx_${"7".repeat(32)}`;
     const outlookId = `mbx_${"8".repeat(32)}`;
     await env.DB.batch([
@@ -4772,14 +4908,41 @@ describe("private mailbox connection control plane", () => {
       });
       expect(proxyBodies.every((body) => body.method === "GET")).toBe(true);
       expect(proxyBodies.some((body) => JSON.stringify(body).includes("metadata"))).toBe(true);
+      expect((await env.DB.prepare("SELECT COUNT(*) total FROM conversation_messages")
+        .first<{ total: number }>())?.total).toBe(0);
+      const synced = await call(`/v1/admin/mailbox-connections/${gmailId}/sync-conversations`, {
+        method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+          limit: 2, confirmation: "SYNC EMAIL METADATA",
+        }),
+      });
+      expect(synced.status).toBe(200);
+      expect(await synced.json()).toMatchObject({ imported: 2, repeated: 0, skipped: 0, received: 2,
+        privacy: { persisted: true, body_source: "provider snippet only", attachments_persisted: false } });
+      expect(await env.DB.prepare(`SELECT t.contact_id,t.unread_count,m.direction,m.status,m.body_text
+        FROM conversation_threads t JOIN conversation_messages m ON m.thread_id=t.id
+        WHERE t.participant_email='ada@example.com'`).first()).toEqual({
+        contact_id: adaContact.contact.id, unread_count: 1, direction: "inbound", status: "received",
+        body_text: "Need a proposal for the rollout",
+      });
+      expect(await env.DB.prepare(`SELECT status,basis FROM communication_consents WHERE contact_id=?`)
+        .bind(adaContact.contact.id).first()).toEqual({ status: "opted_in", basis: "inbound_request" });
+      expect((await env.DB.prepare(`SELECT COUNT(*) total FROM conversation_threads
+        WHERE workspace_id='ws_openoperator' AND provider='gmail' AND provider_thread_id IS NOT NULL`)
+        .first<{ total: number }>())?.total).toBe(2);
+      const repeated = await call(`/v1/admin/mailbox-connections/${gmailId}/sync-conversations`, {
+        method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+          limit: 2, confirmation: "SYNC EMAIL METADATA",
+        }),
+      });
+      expect(await repeated.json()).toMatchObject({ imported: 0, repeated: 2, skipped: 0 });
       expect((await call(`/v1/admin/mailbox-connections/${gmailId}/conversations?limit=26`,
         { headers: adminHeaders })).status).toBe(400);
       await env.DB.prepare("UPDATE mailbox_connections SET status='disabled' WHERE id=?").bind(gmailId).run();
       expect((await call(`/v1/admin/mailbox-connections/${gmailId}/conversations`,
         { headers: adminHeaders })).status).toBe(409);
-      const databaseDump = JSON.stringify(await env.DB.prepare("SELECT * FROM mailbox_connections").all());
-      expect(databaseDump).not.toContain("Need a proposal for the rollout");
-      expect(databaseDump).not.toContain("ada@example.com");
+      const mailboxDump = JSON.stringify(await env.DB.prepare("SELECT * FROM mailbox_connections").all());
+      expect(mailboxDump).not.toContain("Need a proposal for the rollout");
+      expect(mailboxDump).not.toContain("ada@example.com");
     } finally {
       outboundFetch.mockRestore();
     }

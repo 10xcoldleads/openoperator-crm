@@ -449,6 +449,72 @@ export const resendDeliveries = sqliteTable("resend_deliveries", {
   index("resend_deliveries_workspace_created_idx").on(table.workspaceId, table.createdAt),
 ]);
 
+export const communicationConsents = sqliteTable("communication_consents", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "cascade" }),
+  channel: text("channel", { enum: ["email"] }).notNull(),
+  status: text("status", { enum: ["unknown", "opted_in", "opted_out"] }).notNull().default("unknown"),
+  basis: text("basis", { enum: ["unknown", "express", "contractual", "inbound_request", "manual_suppression"] }).notNull().default("unknown"),
+  evidence: text("evidence"),
+  capturedAt: text("captured_at"),
+  revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("communication_consents_contact_channel_unique").on(table.workspaceId, table.contactId, table.channel),
+  index("communication_consents_workspace_status_idx").on(table.workspaceId, table.channel, table.status),
+]);
+
+export const conversationThreads = sqliteTable("conversation_threads", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+  channel: text("channel", { enum: ["email"] }).notNull(),
+  provider: text("provider", { enum: ["gmail", "outlook"] }),
+  providerThreadId: text("provider_thread_id"),
+  participantEmail: text("participant_email").notNull(),
+  subject: text("subject").notNull(),
+  status: text("status", { enum: ["open", "closed"] }).notNull().default("open"),
+  lastMessageAt: text("last_message_at").notNull(),
+  unreadCount: integer("unread_count").notNull().default(0),
+  revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("conversation_threads_workspace_recent_idx").on(table.workspaceId, table.lastMessageAt, table.id),
+  index("conversation_threads_workspace_contact_idx").on(table.workspaceId, table.contactId, table.lastMessageAt),
+  uniqueIndex("conversation_threads_workspace_provider_unique").on(table.workspaceId, table.provider, table.providerThreadId),
+]);
+
+export const conversationMessages = sqliteTable("conversation_messages", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  threadId: text("thread_id").notNull().references(() => conversationThreads.id, { onDelete: "cascade" }),
+  direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
+  provider: text("provider", { enum: ["gmail", "outlook", "resend"] }).notNull(),
+  providerMessageId: text("provider_message_id"),
+  idempotencyKey: text("idempotency_key").notNull(),
+  fromEmail: text("from_email").notNull(),
+  toEmail: text("to_email").notNull(),
+  subject: text("subject").notNull(),
+  bodyText: text("body_text").notNull(),
+  purpose: text("purpose", { enum: ["inbound", "transactional", "marketing"] }).notNull(),
+  status: text("status", { enum: ["received", "pending", "sent", "failed"] }).notNull(),
+  error: text("error"),
+  sentBy: text("sent_by"),
+  occurredAt: text("occurred_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("conversation_messages_workspace_idempotency_unique").on(table.workspaceId, table.idempotencyKey),
+  uniqueIndex("conversation_messages_workspace_provider_unique").on(table.workspaceId, table.provider, table.providerMessageId),
+  index("conversation_messages_thread_occurred_idx").on(table.workspaceId, table.threadId, table.occurredAt, table.id),
+]);
+
 export const agentRequests = sqliteTable("agent_requests", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id),

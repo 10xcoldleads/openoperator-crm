@@ -142,7 +142,8 @@ The repository now implements the foundation data model, operator workflows,
 owner-gated customer workspace provisioning, default pipeline/QC creation, and
 explicit workspace selection. A separate public, write-only ingestion Worker
 connects external funnels without making the dashboard or admin API public. It
-does not yet provide full email/calendar sync,
-telephony, generic custom objects, predictive ML
-scoring, billing, or a self-serve provisioning portal. Those are explicit
+does not yet provide a durable conversations inbox, full calendar sync,
+telephony, predictive ML scoring, billing, or a self-serve provisioning portal.
+Generic custom objects are implemented with versioned schemas, governed
+relations, recovery coverage, and concurrency guards. The remaining capabilities are explicit
 subsequent phases, not features to imply through UI labels.

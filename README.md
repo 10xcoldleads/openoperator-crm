@@ -8,6 +8,7 @@ This project is an independent open-source implementation. It is not affiliated 
 
 - Multi-workspace membership and role enforcement
 - Contacts, companies, deduplication, custom fields, saved views, imports, notes, and activity history
+- Consent-aware email conversations with persisted threads, explicit mailbox sync, suppression, and replay-safe Resend delivery
 - Configurable pipelines, stages, opportunities, forecasting, and optimistic updates
 - Tasks with contact/opportunity relationships and lifecycle controls
 - Visual event-driven automations with conditions, MATCH/ELSE branches, typed variables, run caps, traces, retries, and cancellation
@@ -30,7 +31,7 @@ The repository does not pretend to include a production telephony carrier, payme
 - Automation: deterministic, bounded server execution
 - Agents: least-privilege MCP tools and human approval before sensitive writes
 
-See [architecture](docs/ARCHITECTURE.md), [self-hosting](docs/SELF_HOSTING.md), and the [feature map](docs/GHL_CAPABILITY_MAP.md).
+Start each development session with [project memory](PROJECT_MEMORY.md). See [architecture](docs/ARCHITECTURE.md), [self-hosting](docs/SELF_HOSTING.md), and the [feature map](docs/GHL_CAPABILITY_MAP.md).
 
 ## Local development
 
