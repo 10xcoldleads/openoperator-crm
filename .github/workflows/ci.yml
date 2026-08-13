@@ -15,6 +15,25 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out pinned Twenty provenance
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: twentyhq/twenty
+          ref: 1f55234d0bd1abe20e5615dc5830b254a54831ef
+          path: twenty-reference
+          sparse-checkout: |
+            packages/twenty-front/src/modules/object-record/record-calendar/month/hooks/useRecordCalendarMonthDaysRange.tsx
+            packages/twenty-front/src/modules/object-record/record-calendar/month/utils/getRecordCalendarDateRangeOverlapFilter.ts
+            packages/twenty-front/src/modules/object-record/record-merge/hooks/usePerformMergePreview.ts
+            packages/twenty-front/src/modules/object-record/record-merge/utils/mergeRelationshipData.ts
+            packages/twenty-server/src/engine/metadata-modules/view-permissions/services/view-access.service.ts
+            packages/twenty-server/src/engine/metadata-modules/webhook/utils/generate-webhook-secret.util.ts
+            packages/twenty-server/src/engine/metadata-modules/webhook/utils/transform-event-to-webhook-event.ts
+            packages/twenty-shared/src/application/pageLayoutManifestType.ts
+            packages/twenty-shared/src/application/roleManifestType.ts
+            packages/twenty-shared/src/application/viewManifestType.ts
+            packages/twenty-shared/src/workflow/validation/utils/build-workflow-graph.util.ts
+            packages/twenty-shared/src/workflow/validation/validate-workflow-structure.util.ts
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -28,3 +47,5 @@ jobs:
         run: npm run lint
       - name: Run complete verification suite
         run: npm test
+        env:
+          TWENTY_REFERENCE_ROOT: twenty-reference
