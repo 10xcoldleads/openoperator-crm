@@ -22,6 +22,7 @@ import GradientText from "./components/GradientText";
 import ConversationsWorkspace from "./ConversationsWorkspace";
 import FormsWorkspace from "./FormsWorkspace";
 import BookingWorkspace from "./BookingWorkspace";
+import ReportingWorkspace from "./ReportingWorkspace";
 
 const VisualAutomationBuilder = lazy(() => import("./VisualAutomationBuilder"));
 
@@ -720,7 +721,7 @@ type CommandEntry =
   | { id: string; kind: "contact"; label: string; description: string; record: Contact }
   | { id: string; kind: "company"; label: string; description: string; record: Company }
   | { id: string; kind: "opportunity"; label: string; description: string; record: Opportunity };
-type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "booking" | "tasks" | "agent" | "automations" | "integrations" | "settings";
+type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "booking" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
 type IntegrationDomain = "mailboxes" | "agents" | "sources" | "webhooks";
 type IntegrationCatalogView = "catalog" | "installed";
 type LeadView = "inbox" | "contacts" | "companies" | "visitors";
@@ -735,6 +736,7 @@ const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; gr
   { id: "forms", label: "Forms", icon: "F", group: "Workspace" },
   { id: "booking", label: "Booking", icon: "B", group: "Workspace" },
   { id: "tasks", label: "Calendar & tasks", icon: "T", group: "Workspace" },
+  { id: "reports", label: "Reports", icon: "R", group: "Intelligence" },
   { id: "agent", label: "Agent work", icon: "A", group: "Intelligence" },
   { id: "automations", label: "Automations", icon: "W", group: "Intelligence" },
   { id: "integrations", label: "App connections", icon: "I", group: "System" },
@@ -4826,6 +4828,7 @@ export default function CrmDashboard() {
       <ConversationsWorkspace active={activeView === "conversations"}/>
       <FormsWorkspace active={activeView === "forms"} canAdmin={Boolean(canAdmin)}/>
       <BookingWorkspace active={activeView === "booking"} canAdmin={Boolean(canAdmin)}/>
+      <ReportingWorkspace active={activeView === "reports"}/>
       <section className="metrics" hidden={activeView !== "dashboard"}>
         <article><i aria-hidden="true">◎</i><span>TOTAL CONTACTS</span><strong>{data?.metrics.contacts ?? "—"}</strong><small>Across connected sources</small></article>
         <article><i aria-hidden="true">↗</i><span>CUSTOMERS</span><strong>{data?.metrics.customers ?? "—"}</strong><small>Paying relationships</small></article>
