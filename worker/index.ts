@@ -5732,14 +5732,23 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const changeId = id("chg");
     const after = { ...before, singular_label: singularLabel, plural_label: pluralLabel, description,
       fields: JSON.stringify(fields), active, revision: Number(before.revision) + 1, change_id: changeId, updated_at: now };
-    const results = await env.DB.batch([
-      env.DB.prepare(`UPDATE custom_object_definitions SET singular_label=?,plural_label=?,description=?,fields=?,
-        active=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
-        .bind(singularLabel, pluralLabel, description, JSON.stringify(fields), active, changeId, now,
-          workspaceId, before.id, before.revision),
-      await auditStatement(env, access, request, active ? "custom_object.updated" : "custom_object.archived",
-        "custom_object_definition", String(before.id), before, after),
-    ]);
+    let results: D1Result<unknown>[];
+    try {
+      results = await env.DB.batch([
+        await auditStatement(env, access, request, active ? "custom_object.updated" : "custom_object.archived",
+          "custom_object_definition", String(before.id), before, after),
+        env.DB.prepare(`UPDATE custom_object_definitions SET singular_label=?,plural_label=?,description=?,fields=?,
+          active=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
+          .bind(singularLabel, pluralLabel, description, JSON.stringify(fields), active, changeId, now,
+            workspaceId, before.id, before.revision),
+        env.DB.prepare("INSERT INTO atomic_mutation_guard(ok) SELECT 0 WHERE changes()=0"),
+      ]);
+    } catch (error) {
+      if (String(error).includes("atomic_mutation_must_win")) {
+        return json({ error: "Custom object changed since it was loaded", code: "edit_conflict" }, 409);
+      }
+      throw error;
+    }
     if (!results[0].meta.changes || !results[1].meta.changes) {
       return json({ error: "Custom object changed since it was loaded", code: "edit_conflict" }, 409);
     }
