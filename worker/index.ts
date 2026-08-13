@@ -1991,6 +1991,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/conversations": ["GET"],
     "/v1/admin/conversations/send": ["POST"],
     "/v1/admin/forms": ["GET", "POST"],
+    "/v1/admin/surveys": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
     "/v1/admin/reports/revenue-funnel": ["GET"],
     "/v1/admin/payments/ledger": ["GET", "POST"],
@@ -1998,6 +1999,9 @@ function privateAllowedMethods(pathname: string): string[] | null {
   if (exact[pathname]) return exact[pathname];
   const patterns: Array<[RegExp, string[]]> = [
     [/^\/v1\/admin\/saved-views\/[^/]+$/, ["PATCH", "DELETE"]],
+    [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}$/, ["GET", "PATCH"]],
+    [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
+    [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}\/responses$/, ["GET"]],
     [/^\/v1\/admin\/custom-fields\/cfld_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/views$/, ["GET", "POST"]],
@@ -5210,6 +5214,28 @@ function safeSurvey(row: Record<string, unknown>) {
     revision: row.revision, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
     public_path: row.status === "published" ? `/s/${row.slug}` : null };
 }
+function validateSurveyAnswers(questions: SurveyQuestion[], value: unknown) {
+  if (!isPlainObject(value) || Object.keys(value).some((key) => !questions.some((question) => question.id === key))) throw new ApiError(400, "answers contain an unsupported question");
+  const answers: Record<string, string | string[] | number> = {};
+  for (const question of questions) {
+    const raw = value[question.id];
+    if (question.type === "multi_choice") {
+      const selected = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+      if (question.required && selected.length === 0 || selected.length > question.options.length || new Set(selected).size !== selected.length || selected.some((item) => !question.options.includes(item))) throw new ApiError(400, `${question.label} has an invalid answer`);
+      if (selected.length) answers[question.id] = selected;
+    } else if (question.type === "rating") {
+      const rating = Number(raw);
+      if (question.required && !Number.isInteger(rating) || raw !== undefined && (!Number.isInteger(rating) || rating < 1 || rating > 5)) throw new ApiError(400, `${question.label} must be rated from 1 to 5`);
+      if (Number.isInteger(rating) && rating >= 1 && rating <= 5) answers[question.id] = rating;
+    } else {
+      const answer = typeof raw === "string" ? raw.trim() : ""; const max = question.type === "long_text" ? 4000 : question.type === "email" ? 254 : 500;
+      if (question.required && !answer || answer.length > max || question.type === "email" && answer && !validEmail(normalizeEmail(answer)) ||
+        ["single_choice"].includes(question.type) && answer && !question.options.includes(answer)) throw new ApiError(400, `${question.label} has an invalid answer`);
+      if (answer) answers[question.id] = question.type === "email" ? normalizeEmail(answer) : answer;
+    }
+  }
+  return answers;
+}
 const formFieldDefaults: FormField[] = [
   { key: "email", label: "Email", type: "email", required: true },
   { key: "first_name", label: "First name", type: "text", required: false },
@@ -5470,6 +5496,59 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       return json({ error: "Submission could not be recorded" }, 500);
     }
     return json({ ok: true, duplicate: false, submission_id: submissionId, success_message: published.success_message }, 201);
+  }
+
+  const publicSurveyMatch = url.pathname.match(/^\/v1\/public\/surveys\/([a-z0-9][a-z0-9-]{2,79})$/);
+  if (publicSurveyMatch) {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
+    const row = await env.DB.prepare(`SELECT s.slug,v.id version_id,v.version,v.title,v.description,v.questions,v.success_message
+      FROM surveys s JOIN survey_versions v ON v.id=s.published_version_id AND v.workspace_id=s.workspace_id
+      WHERE s.slug=? AND s.status='published'`).bind(publicSurveyMatch[1]).first<Record<string, unknown>>();
+    if (!row) return json({ error: "Published survey not found" }, 404);
+    return json({ survey: { slug: row.slug, version: row.version, title: row.title, description: row.description,
+      questions: JSON.parse(String(row.questions)), success_message: row.success_message },
+      privacy: { data_use: "Aggregate survey analysis and individual response review", marketing_consent_requested: false } });
+  }
+  const publicSurveyResponseMatch = url.pathname.match(/^\/v1\/public\/surveys\/([a-z0-9][a-z0-9-]{2,79})\/responses$/);
+  if (publicSurveyResponseMatch) {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
+    if (Object.keys(body).some((key) => !["answers", "privacy_accepted", "idempotency_key", "started_at", "website"].includes(key))) return json({ error: "Response contains unsupported fields" }, 400);
+    if (typeof body.website === "string" && body.website.trim()) return json({ ok: true, accepted: true }, 202);
+    if (body.privacy_accepted !== true) return json({ error: "Privacy acknowledgement is required" }, 400);
+    const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) return json({ error: "idempotency_key is invalid" }, 400);
+    const published = await env.DB.prepare(`SELECT s.id survey_id,s.workspace_id,v.id version_id,v.questions,v.success_message
+      FROM surveys s JOIN survey_versions v ON v.id=s.published_version_id AND v.workspace_id=s.workspace_id
+      WHERE s.slug=? AND s.status='published'`).bind(publicSurveyResponseMatch[1]).first<Record<string, unknown>>();
+    if (!published) return json({ error: "Published survey not found" }, 404);
+    let answers; try { answers = validateSurveyAnswers(validateSurveyQuestions(JSON.parse(String(published.questions))), body.answers); }
+    catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Answers are invalid" }, 400); }
+    const encodedAnswers = JSON.stringify(answers);
+    const existing = await env.DB.prepare("SELECT id,answers FROM survey_responses WHERE workspace_id=? AND survey_id=? AND idempotency_key=?")
+      .bind(published.workspace_id, published.survey_id, idempotencyKey).first<Record<string, unknown>>();
+    if (existing) return existing.answers === encodedAnswers ? json({ ok: true, duplicate: true, response_id: existing.id, success_message: published.success_message })
+      : json({ error: "Idempotency key was already used for different answers" }, 409);
+    const now = new Date(); const startedAt = typeof body.started_at === "string" && Number.isFinite(Date.parse(body.started_at)) && Date.parse(body.started_at) <= now.getTime()
+      ? new Date(body.started_at).toISOString() : null;
+    const duration = startedAt ? Math.min(86400, Math.max(0, Math.floor((now.getTime() - Date.parse(startedAt)) / 1000))) : null;
+    const ip = request.headers.get("cf-connecting-ip"); const ipHash = ip ? await sha256(`${published.workspace_id}:${ip}`) : null;
+    if (ipHash) {
+      const recent = await env.DB.prepare("SELECT COUNT(*) total FROM survey_responses WHERE workspace_id=? AND survey_id=? AND ip_hash=? AND submitted_at>?")
+        .bind(published.workspace_id, published.survey_id, ipHash, new Date(now.getTime() - 600_000).toISOString()).first<{ total: number }>();
+      if (Number(recent?.total || 0) >= 10) return json({ error: "Too many responses. Try again later." }, 429, { "retry-after": "600" });
+    }
+    const responseId = id("sresp");
+    try { await env.DB.prepare(`INSERT INTO survey_responses(id,workspace_id,survey_id,survey_version_id,idempotency_key,answers,privacy_accepted,started_at,submitted_at,duration_seconds,ip_hash,user_agent)
+      VALUES(?,?,?,?,?,?,1,?,?,?,?,?)`).bind(responseId, published.workspace_id, published.survey_id, published.version_id, idempotencyKey, encodedAnswers,
+        startedAt, now.toISOString(), duration, ipHash, (request.headers.get("user-agent") || "").slice(0, 300) || null).run(); }
+    catch {
+      const raced = await env.DB.prepare("SELECT id,answers FROM survey_responses WHERE workspace_id=? AND survey_id=? AND idempotency_key=?")
+        .bind(published.workspace_id, published.survey_id, idempotencyKey).first<Record<string, unknown>>();
+      if (raced?.answers === encodedAnswers) return json({ ok: true, duplicate: true, response_id: raced.id, success_message: published.success_message });
+      return json({ error: "Response could not be recorded" }, 500);
+    }
+    return json({ ok: true, duplicate: false, response_id: responseId, success_message: published.success_message }, 201);
   }
 
   const publicBookingMatch = url.pathname.match(/^\/v1\/public\/booking\/([a-z0-9][a-z0-9-]{2,79})$/);
@@ -6358,6 +6437,114 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const rows = await env.DB.prepare(`SELECT * FROM form_submissions WHERE workspace_id=? AND form_id=? ORDER BY submitted_at DESC,id DESC LIMIT 100`)
       .bind(workspaceId, formSubmissionsMatch[1]).all<Record<string, unknown>>();
     return json({ submissions: rows.results.map(safeFormSubmission), truncated: rows.results.length === 100 });
+  }
+
+  if (url.pathname === "/v1/admin/surveys" && request.method === "GET") {
+    const rows = await env.DB.prepare(`SELECT s.*,(SELECT COUNT(*) FROM survey_responses r WHERE r.workspace_id=s.workspace_id AND r.survey_id=s.id) response_count,
+      (SELECT MAX(submitted_at) FROM survey_responses r WHERE r.workspace_id=s.workspace_id AND r.survey_id=s.id) last_response_at
+      FROM surveys s WHERE s.workspace_id=? ORDER BY s.updated_at DESC,s.id`).bind(workspaceId).all<Record<string, unknown>>();
+    return json({ surveys: rows.results.map((row) => ({ ...safeSurvey(row), response_count: row.response_count, last_response_at: row.last_response_at })) });
+  }
+  if (url.pathname === "/v1/admin/surveys" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name", "title"].includes(key))) return json({ error: "Survey request contains unsupported fields" }, 400);
+    const name = optionalString(body.name, "name", 120) || ""; const title = optionalString(body.title, "title", 160) || "";
+    if (!name || !title) return json({ error: "name and title are required" }, 400);
+    const surveyId = id("survey"); const now = new Date().toISOString(); const changeId = id("chg");
+    const slugBase = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "survey";
+    const slug = `${slugBase}-${surveyId.slice(-8)}`; const questions: SurveyQuestion[] = [{ id: "experience", label: "How would you rate your experience?", type: "rating", required: true, options: [] }];
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO surveys(id,workspace_id,name,slug,status,title,description,questions,success_message,published_version_id,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,'draft',?,'',?,'Thanks — your response was recorded.',NULL,1,?,?,?,?)`).bind(surveyId, workspaceId, name, slug, title, JSON.stringify(questions), changeId, access.email, now, now),
+      await auditStatement(env, access, request, "survey.created", "survey", surveyId, null, { name, slug, title }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, surveyId).first<Record<string, unknown>>();
+    return json({ survey: safeSurvey(created!) }, 201);
+  }
+  const adminSurveyMatch = url.pathname.match(/^\/v1\/admin\/surveys\/(survey_[a-f0-9]{32})$/);
+  if (adminSurveyMatch && request.method === "GET") {
+    const survey = await env.DB.prepare("SELECT * FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, adminSurveyMatch[1]).first<Record<string, unknown>>();
+    if (!survey) return json({ error: "Survey not found" }, 404);
+    const versions = await env.DB.prepare("SELECT id,version,published_by,published_at FROM survey_versions WHERE workspace_id=? AND survey_id=? ORDER BY version DESC")
+      .bind(workspaceId, survey.id).all();
+    return json({ survey: safeSurvey(survey), versions: versions.results });
+  }
+  if (adminSurveyMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name", "title", "description", "questions", "success_message", "if_revision"].includes(key))) return json({ error: "Survey update contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, adminSurveyMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Survey not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Survey changed since it was loaded", code: "edit_conflict" }, 409);
+    const name = optionalString(body.name, "name", 120) || ""; const title = optionalString(body.title, "title", 160) || "";
+    const description = optionalString(body.description, "description", 1000) || ""; const successMessage = optionalString(body.success_message, "success_message", 300) || "";
+    if (!name || !title || !successMessage) return json({ error: "name, title, and success_message are required" }, 400);
+    const questions = validateSurveyQuestions(body.questions); const now = new Date().toISOString(); const changeId = id("chg");
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE surveys SET name=?,title=?,description=?,questions=?,success_message=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
+        .bind(name, title, description, JSON.stringify(questions), successMessage, changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,'survey.updated','survey',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM surveys WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeSurvey(before)), JSON.stringify({ name, title, description, questions }), requestId(request), now, workspaceId, before.id, changeId),
+    ]);
+    if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: "Survey changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ survey: safeSurvey(updated!) });
+  }
+  const surveyLifecycleMatch = url.pathname.match(/^\/v1\/admin\/surveys\/(survey_[a-f0-9]{32})\/(publish|revoke)$/);
+  if (surveyLifecycleMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["if_revision", "confirmation"].includes(key))) return json({ error: "Lifecycle request contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, surveyLifecycleMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Survey not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Survey changed since it was loaded", code: "edit_conflict" }, 409);
+    const action = surveyLifecycleMatch[2]; if (body.confirmation !== (action === "publish" ? "PUBLISH SURVEY" : "REVOKE SURVEY")) return json({ error: "Explicit lifecycle confirmation is required" }, 400);
+    if (action === "revoke" && before.status !== "published") return json({ error: "Only a published survey can be revoked" }, 409);
+    validateSurveyQuestions(JSON.parse(String(before.questions))); const now = new Date().toISOString(); const changeId = id("chg");
+    if (action === "publish") {
+      const next = await env.DB.prepare("SELECT COALESCE(MAX(version),0)+1 version FROM survey_versions WHERE workspace_id=? AND survey_id=?").bind(workspaceId, before.id).first<{ version: number }>();
+      const versionId = id("sver");
+      try { const results = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO survey_versions(id,workspace_id,survey_id,version,title,description,questions,success_message,published_by,published_at)
+          SELECT ?,workspace_id,id,?,?,?,?,?,?,? FROM surveys WHERE workspace_id=? AND id=? AND revision=?`).bind(versionId, Number(next?.version || 1), before.title, before.description, before.questions, before.success_message, access.email, now, workspaceId, before.id, before.revision),
+        env.DB.prepare("UPDATE surveys SET status='published',published_version_id=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?")
+          .bind(versionId, changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'survey.published','survey',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM surveys WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeSurvey(before)), JSON.stringify({ version_id: versionId, version: next?.version }), requestId(request), now, workspaceId, before.id, changeId),
+      ]); if (results.some((result) => !result.meta.changes)) throw new Error("conflict"); }
+      catch { return json({ error: "Survey changed before it could be published", code: "edit_conflict" }, 409); }
+    } else {
+      const results = await env.DB.batch([
+        env.DB.prepare("UPDATE surveys SET status='revoked',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?").bind(changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'survey.revoked','survey',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM surveys WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeSurvey(before)), JSON.stringify({ status: "revoked" }), requestId(request), now, workspaceId, before.id, changeId),
+      ]); if (results.some((result) => !result.meta.changes)) return json({ error: "Survey changed before it could be revoked", code: "edit_conflict" }, 409);
+    }
+    const updated = await env.DB.prepare("SELECT * FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ survey: safeSurvey(updated!) });
+  }
+  const surveyResponsesMatch = url.pathname.match(/^\/v1\/admin\/surveys\/(survey_[a-f0-9]{32})\/responses$/);
+  if (surveyResponsesMatch && request.method === "GET") {
+    const survey = await env.DB.prepare("SELECT id FROM surveys WHERE workspace_id=? AND id=?").bind(workspaceId, surveyResponsesMatch[1]).first<Record<string, unknown>>();
+    if (!survey) return json({ error: "Survey not found" }, 404);
+    const rows = await env.DB.prepare(`SELECT r.id,r.survey_version_id,r.answers,r.started_at,r.submitted_at,r.duration_seconds,v.version,v.questions
+      FROM survey_responses r JOIN survey_versions v ON v.id=r.survey_version_id AND v.workspace_id=r.workspace_id
+      WHERE r.workspace_id=? AND r.survey_id=? ORDER BY r.submitted_at DESC,r.id DESC LIMIT 101`)
+      .bind(workspaceId, survey.id).all<Record<string, unknown>>();
+    const evidence = rows.results.slice(0, 100).map((row) => ({ ...row, answers: JSON.parse(String(row.answers)) })) as Array<Record<string, unknown> & { answers: Record<string, unknown> }>;
+    const versions = [...new Set(evidence.map((row) => Number(row.version)))];
+    const versionSummaries = versions.map((version) => {
+      const versionRows = evidence.filter((row) => Number(row.version) === version);
+      const questions = validateSurveyQuestions(JSON.parse(String(versionRows[0].questions)));
+      const summary = questions.map((question) => { const values = versionRows.map((row) => (row.answers as Record<string, unknown>)[question.id]).filter((value) => value !== undefined);
+        const counts = question.type === "single_choice" || question.type === "multi_choice" ? question.options.map((option) => ({ option, count: values.filter((value) => Array.isArray(value) ? value.includes(option) : value === option).length })) : null;
+        const average = question.type === "rating" && values.length ? values.reduce<number>((sum, value) => sum + Number(value), 0) / values.length : null;
+        return { question_id: question.id, label: question.label, type: question.type, answered: values.length, counts, average }; });
+      return { version, response_count: versionRows.length, summary };
+    });
+    const responses = evidence.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => key !== "questions")));
+    return json({ responses, version_summaries: versionSummaries, truncated: rows.results.length > 100 });
   }
 
   const communicationConsentMatch = url.pathname.match(/^\/v1\/admin\/contacts\/([^/]+)\/communication-consent$/);
@@ -8050,6 +8237,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM survey_responses WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM survey_versions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM surveys WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM payment_ledger_entries WHERE workspace_id=? AND parent_entry_id IS NOT NULL").bind(workspaceId),
       env.DB.prepare("DELETE FROM payment_ledger_entries WHERE workspace_id=? AND parent_entry_id IS NULL").bind(workspaceId),
       env.DB.prepare("DELETE FROM booking_appointments WHERE workspace_id=?").bind(workspaceId),

@@ -139,6 +139,33 @@ test("ships a functional admin-only append-only payment register", async () => {
   assert.match(migration, /payment_ledger_workspace_idempotency_unique/);
 });
 
+test("ships a functional responsive versioned survey surface", async () => {
+  const [dashboard, workspace, publicSurvey, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/SurveysWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/s/[slug]/PublicSurvey.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0052_surveys_core.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "surveys", label: "Surveys"/);
+  assert.match(dashboard, /<SurveysWorkspace active=\{activeView === "surveys"\}/);
+  assert.match(workspace, /PUBLISH SURVEY/);
+  assert.match(workspace, /REVOKE SURVEY/);
+  assert.match(workspace, /Published questions freeze/);
+  assert.match(workspace, /STABLE ID/);
+  assert.match(workspace, /RECENT IMMUTABLE RESPONSES/);
+  assert.match(workspace, /version_summaries/);
+  assert.match(publicSurvey, /privacy_accepted:privacy/);
+  assert.match(publicSurvey, /No marketing consent is requested/);
+  assert.match(publicSurvey, /replay\.current\|\|=`survey:\$\{crypto\.randomUUID\(\)\}`/);
+  assert.match(publicSurvey, /question\?\.required&&!answered/);
+  assert.match(styles, /\.survey-admin-layout\{display:grid;grid-template-columns:210px minmax\(420px,1fr\) 250px/);
+  assert.match(styles, /@media\(max-width:700px\)\{\.surveys-workspace[\s\S]*\.survey-admin-layout\{grid-template-columns:1fr/);
+  assert.match(migration, /survey_versions_immutable_update/);
+  assert.match(migration, /survey_responses_immutable_update/);
+  assert.match(migration, /survey_responses_survey_idempotency_unique/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);
