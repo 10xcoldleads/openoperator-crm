@@ -21,7 +21,7 @@
     "ingest:types": "wrangler types --config ingest-worker/wrangler.jsonc ingest-worker/env.d.ts",
     "ingest:check": "wrangler deploy --config ingest-worker/wrangler.jsonc --dry-run",
     "ingest:deploy": "wrangler deploy --config ingest-worker/wrangler.jsonc",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .test-dist --ignore-pattern .next --ignore-pattern worker-configuration.d.ts --ignore-pattern ingest-worker/env.d.ts"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .test-dist --ignore-pattern .next --ignore-pattern twenty-reference --ignore-pattern worker-configuration.d.ts --ignore-pattern ingest-worker/env.d.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
