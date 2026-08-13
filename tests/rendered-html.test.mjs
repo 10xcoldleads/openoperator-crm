@@ -120,6 +120,25 @@ test("ships a truthful responsive first-party reporting surface", async () => {
   assert.match(styles, /@media\(max-width:620px\)\{\.report-workspace/);
 });
 
+test("ships a functional admin-only append-only payment register", async () => {
+  const [dashboard, workspace, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/PaymentsWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0051_payment_ledger.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "payments", label: "Payments"[\s\S]*adminOnly: true/);
+  assert.match(dashboard, /<PaymentsWorkspace active=\{activeView === "payments" && Boolean\(canAdmin\)\}/);
+  assert.match(workspace, /No Stripe, bank, payout, invoice, or settlement synchronization is active/);
+  assert.match(workspace, /CONFIRM RECORD PAYMENT/);
+  assert.match(workspace, /pendingIdempotencyKey\.current/);
+  assert.match(workspace, /permanent event/);
+  assert.doesNotMatch(workspace, /method:\s*"(?:PATCH|DELETE)"/);
+  assert.match(styles, /@media\(max-width:620px\)\{\.payments-workspace/);
+  assert.match(migration, /payment_ledger_immutable_update/);
+  assert.match(migration, /payment_ledger_workspace_idempotency_unique/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);

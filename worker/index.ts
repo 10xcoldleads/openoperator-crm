@@ -225,7 +225,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 27;
+const RECOVERY_SCHEMA_VERSION = 28;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -236,7 +236,8 @@ type RecoveryTable =
   | "visitor_events" | "visitor_intent_cases" | "mailbox_connections"
   | "communication_consents" | "conversation_threads" | "conversation_messages"
   | "forms" | "form_versions" | "form_submissions"
-  | "booking_calendars" | "booking_availability_rules" | "booking_appointments";
+  | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
+  | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
 const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   pipelines: { columns: ["id", "workspace_id", "name", "object_type", "active", "created_at", "updated_at"] },
@@ -275,6 +276,7 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
+  payment_ledger_entries: { columns: ["id", "workspace_id", "contact_id", "opportunity_id", "parent_entry_id", "idempotency_key", "kind", "amount_minor", "currency", "description", "provider", "provider_reference", "occurred_at", "created_by", "created_at"] },
 };
 const recoveryTables = Object.keys(recoverySpecs) as RecoveryTable[];
 const securityHeaders = {
@@ -1987,6 +1989,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/forms": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
     "/v1/admin/reports/revenue-funnel": ["GET"],
+    "/v1/admin/payments/ledger": ["GET", "POST"],
   };
   if (exact[pathname]) return exact[pathname];
   const patterns: Array<[RegExp, string[]]> = [
@@ -2017,6 +2020,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/booking-calendars\/bcal_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/booking-calendars\/bcal_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/booking-calendars\/bcal_[a-f0-9]{32}\/appointments$/, ["GET"]],
+    [/^\/v1\/admin\/payments\/ledger\/pay_[a-f0-9]{32}\/adjustments$/, ["POST"]],
     [/^\/v1\/admin\/opportunities\/[^/]+\/intelligence$/, ["GET"]],
     [/^\/v1\/admin\/opportunities\/[^/]+$/, ["PATCH", "DELETE"]],
     [/^\/v1\/admin\/tasks\/[^/]+$/, ["PATCH", "DELETE"]],
@@ -2459,6 +2463,34 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     }
     bookingIdempotency.add(replay);
     bookingTokens.add(String(row.manage_token_hash));
+  }
+  const paymentIdempotency = new Set<string>();
+  const paymentProviderReferences = new Set<string>();
+  for (const row of tables.payment_ledger_entries) {
+    requireReference("payment_ledger_entries", row, "contact_id", "contacts", true);
+    requireReference("payment_ledger_entries", row, "opportunity_id", "opportunities", true);
+    requireReference("payment_ledger_entries", row, "parent_entry_id", "payment_ledger_entries", true);
+    const kind = String(row.kind); const parent = row.parent_entry_id === null ? null :
+      tables.payment_ledger_entries.find((candidate) => candidate.id === row.parent_entry_id);
+    const providerIdentity = row.provider_reference === null ? null : `${row.provider}:${row.provider_reference}`;
+    if (paymentIdempotency.has(String(row.idempotency_key)) || (providerIdentity && paymentProviderReferences.has(providerIdentity)) ||
+      !/^[A-Za-z0-9._:-]{8,100}$/.test(String(row.idempotency_key)) || !["payment", "refund", "dispute", "dispute_reversal"].includes(kind) ||
+      !Number.isSafeInteger(row.amount_minor) || Number(row.amount_minor) <= 0 || !/^[A-Z]{3}$/.test(String(row.currency)) ||
+      row.provider !== "manual" || !Number.isFinite(Date.parse(String(row.occurred_at))) ||
+      (kind === "payment" ? row.parent_entry_id !== null : !parent || parent.kind !== "payment" || parent.currency !== row.currency)) {
+      throw new ApiError(400, "Backup contains an invalid payment ledger entry");
+    }
+    paymentIdempotency.add(String(row.idempotency_key));
+    if (providerIdentity) paymentProviderReferences.add(providerIdentity);
+  }
+  for (const payment of tables.payment_ledger_entries.filter((row) => row.kind === "payment")) {
+    const adjustments = tables.payment_ledger_entries.filter((row) => row.parent_entry_id === payment.id);
+    const total = (kind: string) => adjustments.filter((row) => row.kind === kind)
+      .reduce((sum, row) => sum + Number(row.amount_minor), 0);
+    const refunds = total("refund"); const disputes = total("dispute"); const reversals = total("dispute_reversal");
+    if (refunds > Number(payment.amount_minor) || disputes > Number(payment.amount_minor) || reversals > disputes) {
+      throw new ApiError(400, "Backup contains over-allocated payment adjustments");
+    }
   }
   const formSlugs = new Set<string>();
   for (const row of tables.forms) {
@@ -5248,6 +5280,27 @@ async function bookingAvailability(env: FrameworkEnv, calendar: Record<string, u
   return slots;
 }
 
+function safePaymentEntry(row: Record<string, unknown>) {
+  return { id: row.id, contact_id: row.contact_id, opportunity_id: row.opportunity_id, parent_entry_id: row.parent_entry_id,
+    kind: row.kind, amount_minor: row.amount_minor, currency: row.currency, description: row.description, provider: row.provider,
+    provider_reference: row.provider_reference, occurred_at: row.occurred_at, created_by: row.created_by, created_at: row.created_at,
+    contact_email: row.contact_email || null, contact_name: row.contact_name || null, opportunity_name: row.opportunity_name || null };
+}
+function paymentSignedAmount(kind: string, amount: number) {
+  return ["refund", "dispute"].includes(kind) ? -amount : amount;
+}
+function validateMoneyInput(body: Json) {
+  const amountMinor = Number(body.amount_minor); const currency = optionalString(body.currency, "currency", 3)?.toUpperCase() || "";
+  const description = optionalString(body.description, "description", 300) || "";
+  const occurredAt = optionalString(body.occurred_at, "occurred_at", 50) || "";
+  const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0 || !/^[A-Z]{3}$/.test(currency) || !description ||
+    !Number.isFinite(Date.parse(occurredAt)) || Date.parse(occurredAt) > Date.now() + 60_000 || !/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) {
+    throw new ApiError(400, "amount_minor, ISO currency, description, non-future occurred_at, and idempotency_key are required");
+  }
+  return { amountMinor, currency, description, occurredAt: new Date(occurredAt).toISOString(), idempotencyKey };
+}
+
 async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Response | null> {
   const mcpResponse = await handleAgentMcp(request, env, url);
   if (mcpResponse) return mcpResponse;
@@ -5908,6 +5961,115 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       },
       generated_at: now.toISOString(),
     });
+  }
+
+  if (url.pathname === "/v1/admin/payments/ledger" && request.method === "GET") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const currency = (url.searchParams.get("currency") || "").toUpperCase();
+    if (currency && !/^[A-Z]{3}$/.test(currency)) return json({ error: "currency must be a three-letter ISO code" }, 400);
+    const rows = await env.DB.prepare(`SELECT e.*,c.email contact_email,trim(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,o.name opportunity_name
+      FROM payment_ledger_entries e LEFT JOIN contacts c ON c.workspace_id=e.workspace_id AND c.id=e.contact_id
+      LEFT JOIN opportunities o ON o.workspace_id=e.workspace_id AND o.id=e.opportunity_id
+      WHERE e.workspace_id=? AND (?='' OR e.currency=?) ORDER BY e.occurred_at DESC,e.id DESC LIMIT 501`)
+      .bind(workspaceId, currency, currency).all<Record<string, unknown>>();
+    const [balances, contacts, opportunities] = await Promise.all([
+      env.DB.prepare(`SELECT currency,
+      SUM(CASE kind WHEN 'payment' THEN amount_minor WHEN 'dispute_reversal' THEN amount_minor ELSE -amount_minor END) net_minor,
+      SUM(CASE WHEN kind='payment' THEN amount_minor ELSE 0 END) gross_minor,
+      SUM(CASE WHEN kind='refund' THEN amount_minor ELSE 0 END) refunded_minor,
+      SUM(CASE WHEN kind='dispute' THEN amount_minor ELSE 0 END)-SUM(CASE WHEN kind='dispute_reversal' THEN amount_minor ELSE 0 END) disputed_minor
+      FROM payment_ledger_entries WHERE workspace_id=? GROUP BY currency ORDER BY currency`).bind(workspaceId).all(),
+      env.DB.prepare(`SELECT id,email,first_name,last_name FROM contacts WHERE workspace_id=? ORDER BY updated_at DESC,id LIMIT 200`)
+        .bind(workspaceId).all(),
+      env.DB.prepare(`SELECT id,contact_id,name,currency FROM opportunities WHERE workspace_id=? ORDER BY updated_at DESC,id LIMIT 200`)
+        .bind(workspaceId).all(),
+    ]);
+    return json({ entries: rows.results.slice(0, 500).map(safePaymentEntry), balances: balances.results,
+      links: { contacts: contacts.results, opportunities: opportunities.results },
+      truncated: rows.results.length > 500, provider_boundary: { mode: "manual", external_providers: false },
+      accounting: { amounts: "integer minor units", model: "append-only events", currency_conversion: false } });
+  }
+  if (url.pathname === "/v1/admin/payments/ledger" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["contact_id", "opportunity_id", "amount_minor", "currency", "description", "occurred_at", "idempotency_key", "provider_reference", "confirmation"].includes(key))) {
+      return json({ error: "Payment request contains unsupported fields" }, 400);
+    }
+    if (body.confirmation !== "RECORD PAYMENT") return json({ error: "Explicit payment confirmation is required" }, 400);
+    let money; try { money = validateMoneyInput(body); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Payment is invalid" }, 400); }
+    const contactId = optionalString(body.contact_id, "contact_id", 100); const opportunityId = optionalString(body.opportunity_id, "opportunity_id", 100);
+    const providerReference = optionalString(body.provider_reference, "provider_reference", 160);
+    if (!contactId && !opportunityId) return json({ error: "A contact or opportunity link is required" }, 400);
+    const [contact, opportunity] = await Promise.all([
+      contactId ? env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND id=?").bind(workspaceId, contactId).first() : null,
+      opportunityId ? env.DB.prepare("SELECT id,contact_id FROM opportunities WHERE workspace_id=? AND id=?").bind(workspaceId, opportunityId).first<{ id: string; contact_id: string }>() : null,
+    ]);
+    if (contactId && !contact || opportunityId && !opportunity || opportunity && contactId && opportunity.contact_id !== contactId) return json({ error: "Linked contact or opportunity is invalid" }, 400);
+    const resolvedContactId = contactId || opportunity?.contact_id || null;
+    const existing = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE workspace_id=? AND idempotency_key=?").bind(workspaceId, money.idempotencyKey).first<Record<string, unknown>>();
+    if (existing) {
+      if (existing.kind !== "payment" || existing.amount_minor !== money.amountMinor || existing.currency !== money.currency || existing.contact_id !== resolvedContactId || existing.opportunity_id !== (opportunityId || null)) {
+        return json({ error: "Idempotency key was already used for a different ledger event" }, 409);
+      }
+      return json({ entry: safePaymentEntry(existing), duplicate: true });
+    }
+    const entryId = id("pay"); const now = new Date().toISOString();
+    try { await env.DB.batch([
+      env.DB.prepare(`INSERT INTO payment_ledger_entries(id,workspace_id,contact_id,opportunity_id,parent_entry_id,idempotency_key,kind,amount_minor,currency,description,provider,provider_reference,occurred_at,created_by,created_at)
+        VALUES(?,?,?,?,?,?,'payment',?,?,?,'manual',?,?,?,?)`).bind(entryId, workspaceId, resolvedContactId, opportunityId || null, null, money.idempotencyKey,
+          money.amountMinor, money.currency, money.description, providerReference, money.occurredAt, access.email, now),
+      await auditStatement(env, access, request, "payment.recorded", "payment_ledger_entry", entryId, null,
+        { kind: "payment", amount_minor: money.amountMinor, currency: money.currency, contact_id: resolvedContactId, opportunity_id: opportunityId || null }),
+    ]); } catch {
+      const raced = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE workspace_id=? AND idempotency_key=?").bind(workspaceId, money.idempotencyKey).first<Record<string, unknown>>();
+      if (raced && raced.kind === "payment" && raced.amount_minor === money.amountMinor && raced.currency === money.currency && raced.contact_id === resolvedContactId && raced.opportunity_id === (opportunityId || null)) return json({ entry: safePaymentEntry(raced), duplicate: true });
+      return providerReference ? json({ error: "Payment reference or idempotency key already exists" }, 409) : json({ error: "Payment could not be recorded" }, 500);
+    }
+    const created = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE id=?").bind(entryId).first<Record<string, unknown>>();
+    return json({ entry: safePaymentEntry(created!), duplicate: false }, 201);
+  }
+  const paymentAdjustmentMatch = url.pathname.match(/^\/v1\/admin\/payments\/ledger\/(pay_[a-f0-9]{32})\/adjustments$/);
+  if (paymentAdjustmentMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["kind", "amount_minor", "currency", "description", "occurred_at", "idempotency_key", "provider_reference", "confirmation"].includes(key))) return json({ error: "Adjustment request contains unsupported fields" }, 400);
+    const kind = optionalString(body.kind, "kind", 30) || "";
+    if (!["refund", "dispute", "dispute_reversal"].includes(kind) || body.confirmation !== `RECORD ${kind.replace("_", " ").toUpperCase()}`) return json({ error: "Valid adjustment kind and explicit confirmation are required" }, 400);
+    let money; try { money = validateMoneyInput(body); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Adjustment is invalid" }, 400); }
+    const parent = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE workspace_id=? AND id=? AND kind='payment'").bind(workspaceId, paymentAdjustmentMatch[1]).first<Record<string, unknown>>();
+    if (!parent) return json({ error: "Original payment not found" }, 404);
+    if (parent.currency !== money.currency) return json({ error: "Adjustment currency must match the original payment" }, 400);
+    const existing = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE workspace_id=? AND idempotency_key=?").bind(workspaceId, money.idempotencyKey).first<Record<string, unknown>>();
+    if (existing) return existing.kind === kind && existing.parent_entry_id === parent.id && existing.amount_minor === money.amountMinor && existing.currency === money.currency
+      ? json({ entry: safePaymentEntry(existing), duplicate: true }) : json({ error: "Idempotency key was already used for a different ledger event" }, 409);
+    const totals = await env.DB.prepare(`SELECT
+      COALESCE(SUM(CASE WHEN kind='refund' THEN amount_minor ELSE 0 END),0) refunded,
+      COALESCE(SUM(CASE WHEN kind='dispute' THEN amount_minor ELSE 0 END),0) disputed,
+      COALESCE(SUM(CASE WHEN kind='dispute_reversal' THEN amount_minor ELSE 0 END),0) reversed
+      FROM payment_ledger_entries WHERE workspace_id=? AND parent_entry_id=?`).bind(workspaceId, parent.id).first<Record<string, number>>();
+    const remaining = kind === "refund" ? Number(parent.amount_minor) - Number(totals?.refunded || 0)
+      : kind === "dispute" ? Number(parent.amount_minor) - Number(totals?.disputed || 0)
+        : Number(totals?.disputed || 0) - Number(totals?.reversed || 0);
+    if (money.amountMinor > remaining) return json({ error: "Adjustment exceeds the eligible remaining amount", remaining_minor: remaining }, 409);
+    const entryId = id("pay"); const now = new Date().toISOString(); const providerReference = optionalString(body.provider_reference, "provider_reference", 160);
+    try { await env.DB.batch([
+      env.DB.prepare(`SELECT CASE WHEN ? <= (CASE ? WHEN 'refund' THEN CAST(? AS INTEGER)-COALESCE(SUM(CASE WHEN kind='refund' THEN amount_minor ELSE 0 END),0)
+        WHEN 'dispute' THEN CAST(? AS INTEGER)-COALESCE(SUM(CASE WHEN kind='dispute' THEN amount_minor ELSE 0 END),0)
+        ELSE COALESCE(SUM(CASE WHEN kind='dispute' THEN amount_minor ELSE 0 END),0)-COALESCE(SUM(CASE WHEN kind='dispute_reversal' THEN amount_minor ELSE 0 END),0) END)
+        THEN 1 ELSE json('adjustment_conflict') END FROM payment_ledger_entries WHERE workspace_id=? AND (id=? OR parent_entry_id=?)`)
+        .bind(money.amountMinor, kind, parent.amount_minor, parent.amount_minor, workspaceId, parent.id, parent.id),
+      env.DB.prepare(`INSERT INTO payment_ledger_entries(id,workspace_id,contact_id,opportunity_id,parent_entry_id,idempotency_key,kind,amount_minor,currency,description,provider,provider_reference,occurred_at,created_by,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,'manual',?,?,?,?)`).bind(entryId, workspaceId, parent.contact_id, parent.opportunity_id, parent.id, money.idempotencyKey, kind,
+          money.amountMinor, money.currency, money.description, providerReference, money.occurredAt, access.email, now),
+      await auditStatement(env, access, request, `payment.${kind}`, "payment_ledger_entry", entryId, null,
+        { parent_entry_id: parent.id, kind, amount_minor: money.amountMinor, currency: money.currency }),
+    ]); } catch {
+      const raced = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE workspace_id=? AND idempotency_key=?").bind(workspaceId, money.idempotencyKey).first<Record<string, unknown>>();
+      if (raced && raced.kind === kind && raced.parent_entry_id === parent.id && raced.amount_minor === money.amountMinor) return json({ entry: safePaymentEntry(raced), duplicate: true });
+      return json({ error: "Adjustment conflicts with a concurrent event or duplicate reference" }, 409);
+    }
+    const created = await env.DB.prepare("SELECT * FROM payment_ledger_entries WHERE id=?").bind(entryId).first<Record<string, unknown>>();
+    return json({ entry: safePaymentEntry(created!), duplicate: false, signed_amount_minor: paymentSignedAmount(kind, money.amountMinor) }, 201);
   }
 
   if (url.pathname === "/v1/admin/booking-calendars" && request.method === "GET") {
@@ -7831,6 +7993,8 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM payment_ledger_entries WHERE workspace_id=? AND parent_entry_id IS NOT NULL").bind(workspaceId),
+      env.DB.prepare("DELETE FROM payment_ledger_entries WHERE workspace_id=? AND parent_entry_id IS NULL").bind(workspaceId),
       env.DB.prepare("DELETE FROM booking_appointments WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM booking_availability_rules WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM booking_calendars WHERE workspace_id=?").bind(workspaceId),
