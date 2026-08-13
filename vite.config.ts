@@ -11,7 +11,6 @@ const localBindingConfig = {
   name: "openoperator-crm",
   main: "./worker/index.ts",
   compatibility_date: "2026-07-25",
-  compatibility_flags: ["nodejs_compat"],
   vars: {
     ADMIN_EMAILS: "owner@example.com",
     WEBHOOK_ENCRYPTION_KEY: "local-development-only-webhook-key",
@@ -36,7 +35,6 @@ const productionBindingConfig = {
   name: "openoperator-crm",
   main: "./worker/index.ts",
   compatibility_date: "2026-08-13",
-  compatibility_flags: ["nodejs_compat"],
   d1_databases: [
     {
       binding: "DB",
