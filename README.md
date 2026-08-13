@@ -30,7 +30,7 @@ The repository does not pretend to include a production telephony carrier, payme
 - Automation: deterministic, bounded server execution
 - Agents: least-privilege MCP tools and human approval before sensitive writes
 
-See [architecture](docs/ARCHITECTURE.md), [self-hosting](docs/SELF_HOSTING.md), and the [feature map](docs/GHL_CAPABILITY_MAP.md).
+Start each development session with [project memory](PROJECT_MEMORY.md). See [architecture](docs/ARCHITECTURE.md), [self-hosting](docs/SELF_HOSTING.md), and the [feature map](docs/GHL_CAPABILITY_MAP.md).
 
 ## Local development
 
