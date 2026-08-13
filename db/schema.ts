@@ -499,6 +499,38 @@ export const marketingCampaignRecipients = sqliteTable("marketing_campaign_recip
   index("marketing_campaign_recipients_campaign_status_idx").on(table.workspaceId, table.campaignId, table.status, table.id),
 ]);
 
+export const reviewDestinations = sqliteTable("review_destinations", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(), businessName: text("business_name").notNull(), reviewUrl: text("review_url").notNull(),
+  status: text("status", { enum: ["active", "revoked"] }).notNull().default("active"), revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [index("review_destinations_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt, table.id)]);
+
+export const reviewRequests = sqliteTable("review_requests", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  destinationId: text("destination_id").notNull().references(() => reviewDestinations.id, { onDelete: "restrict" }),
+  contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "restrict" }), email: text("email").notNull(), firstName: text("first_name"),
+  businessName: text("business_name").notNull(), reviewUrl: text("review_url").notNull(), subject: text("subject").notNull(), bodyText: text("body_text").notNull(),
+  feedbackTokenHash: text("feedback_token_hash").notNull(), unsubscribeTokenHash: text("unsubscribe_token_hash").notNull(),
+  status: text("status", { enum: ["pending", "sending", "succeeded", "failed"] }).notNull().default("pending"), attemptCount: integer("attempt_count").notNull().default(0),
+  providerEmailId: text("provider_email_id"), responseStatus: integer("response_status"), error: text("error"), sentAt: text("sent_at"),
+  createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("review_requests_feedback_token_hash_unique").on(table.feedbackTokenHash),
+  uniqueIndex("review_requests_unsubscribe_token_hash_unique").on(table.unsubscribeTokenHash),
+  index("review_requests_workspace_created_idx").on(table.workspaceId, table.createdAt, table.id),
+]);
+
+export const reviewFeedback = sqliteTable("review_feedback", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  requestId: text("request_id").notNull().references(() => reviewRequests.id, { onDelete: "restrict" }), idempotencyKey: text("idempotency_key").notNull(),
+  rating: integer("rating").notNull(), feedback: text("feedback"), privacyText: text("privacy_text").notNull(), ipHash: text("ip_hash"),
+  userAgent: text("user_agent"), submittedAt: text("submitted_at").notNull(),
+}, (table) => [
+  uniqueIndex("review_feedback_request_unique").on(table.workspaceId, table.requestId),
+  uniqueIndex("review_feedback_idempotency_unique").on(table.workspaceId, table.idempotencyKey),
+]);
+
 export const conversationThreads = sqliteTable("conversation_threads", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

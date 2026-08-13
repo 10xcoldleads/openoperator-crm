@@ -95,6 +95,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM mailbox_connections"),
     env.DB.prepare("DELETE FROM conversation_messages"),
     env.DB.prepare("DELETE FROM conversation_threads"),
+    env.DB.prepare("DELETE FROM review_feedback"),
+    env.DB.prepare("DELETE FROM review_requests"),
+    env.DB.prepare("DELETE FROM review_destinations"),
     env.DB.prepare("DELETE FROM marketing_campaign_recipients"),
     env.DB.prepare("DELETE FROM marketing_campaign_versions"),
     env.DB.prepare("DELETE FROM marketing_campaigns"),
@@ -923,6 +926,62 @@ describe("authorization and transport security", () => {
     const latest = await call(`/v1/admin/sites/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as { site: { revision: number } };
     expect((await call(`/v1/admin/sites/${created.id}/revoke`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: latest.site.revision, confirmation: "REVOKE SITE" }) })).status).toBe(200);
     expect((await call(`/v1/public/sites/${created.slug}?path=/`)).status).toBe(404);
+  });
+
+  it("[reviews] sends only with express consent, retries provider failure, records private feedback once, and never gates the public link", async () => {
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_review_member','ws_openoperator','review-member@example.com','member',1,?)`).bind(now).run();
+    const member = { "oai-authenticated-user-email": "review-member@example.com", ...jsonHeaders };
+    expect((await call("/v1/admin/review-destinations", { method: "POST", headers: member, body: "{}" })).status).toBe(403);
+    expect((await call("/v1/admin/review-destinations", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Unsafe", business_name: "Unsafe", review_url: "http://user:pass@example.com" }) })).status).toBe(400);
+    const contactId = `con_${"4".repeat(32)}`;
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,first_name,status,stage,score,tags,custom_fields,created_at,updated_at)
+        VALUES(?,?,?,'Riley','lead','new',0,'[]','{}',?,?)`).bind(contactId, "ws_openoperator", "riley@example.com", now, now),
+      env.DB.prepare(`INSERT INTO communication_consents(id,workspace_id,contact_id,channel,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,'email','opted_in','express','Fixture express consent',?,1,?,'fixture',?,?)`).bind("consent_review_fixture", "ws_openoperator", contactId, now, "chg_review_fixture", now, now),
+    ]);
+    const connection = await call("/v1/admin/resend-connection", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ label: "Review sender", api_key: "re_review_test_workspace_secret_123", from_email: "reviews@openoperator.ai", from_name: "OpenOperator" }) }).then(response => response.json()) as { connection: { revision: number } };
+    const providerBodies: Array<{ text: string }> = [];
+    const outbound = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => { providerBodies.push(JSON.parse(String(init?.body)) as { text: string }); return Response.json({ id: "verify_review_sender" }); });
+    expect((await call("/v1/admin/resend-connection/verify", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ expected_revision: connection.connection.revision, idempotency_key: "review-verify-1" }) })).status).toBe(201);
+    providerBodies.length = 0;
+    const destinationResponse = await call("/v1/admin/review-destinations", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Google profile", business_name: "Operator Labs", review_url: "https://example.com/public-review" }) });
+    expect(destinationResponse.status).toBe(201); const destination = (await destinationResponse.json() as { destination: { id: string; revision: number; ownership_verified: boolean } }).destination;
+    expect(destination.ownership_verified).toBe(false);
+    outbound.mockImplementation(async (_input, init) => { providerBodies.push(JSON.parse(String(init?.body)) as { text: string }); return Response.json({ message: "temporary" }, { status: 503 }); });
+    const sendResponse = await call("/v1/admin/review-requests", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ destination_id: destination.id, contact_id: contactId, subject: "Honest feedback", body_text: "Tell us how we did.", confirmation: "SEND REVIEW REQUEST" }) });
+    expect(sendResponse.status).toBe(201); const failed = (await sendResponse.json() as { request: { id: string; status: string; attempt_count: number } }).request;
+    expect(failed).toMatchObject({ status: "failed", attempt_count: 1 });
+    outbound.mockImplementation(async (_input, init) => { providerBodies.push(JSON.parse(String(init?.body)) as { text: string }); return Response.json({ id: "review_provider_accepted" }); });
+    expect((await call(`/v1/admin/review-requests/${failed.id}/retry`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ confirmation: "RETRY REVIEW REQUEST" }) })).status).toBe(200);
+    expect((await call(`/v1/admin/review-requests/${failed.id}/retry`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ confirmation: "RETRY REVIEW REQUEST" }) })).status).toBe(409);
+    const text = providerBodies.at(-1)?.text || ""; const feedbackToken = text.match(/#(revfb_revreq_[a-f0-9]{32}_[a-f0-9]{64})/)?.[1]; const unsubscribeToken = text.match(/#(revunsub_revreq_[a-f0-9]{32}_[a-f0-9]{64})/)?.[1];
+    expect(feedbackToken).toBeTruthy(); expect(unsubscribeToken).toBeTruthy(); expect(text).toMatch(/same public review link regardless of rating/i);
+    const adminLedger = JSON.stringify(await call("/v1/admin/review-requests", { headers: adminHeaders }).then(response => response.json()));
+    expect(adminLedger).not.toMatch(/revfb_|revunsub_|token_hash/);
+    const session = await call("/v1/public/reviews/session", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ token: feedbackToken }) }).then(response => response.json()) as { session: { review_url: string; review_policy: string } };
+    expect(session.session).toMatchObject({ review_url: "https://example.com/public-review", review_policy: expect.stringMatching(/same public review link/i) });
+    const feedbackBody = { token: feedbackToken, rating: 1, feedback: "Please follow up.", privacy_accepted: true, idempotency_key: "review-feedback-test-1", website: "" };
+    expect((await call("/v1/public/reviews/feedback", { method: "POST", headers: jsonHeaders, body: JSON.stringify(feedbackBody) })).status).toBe(201);
+    const replay = await call("/v1/public/reviews/feedback", { method: "POST", headers: jsonHeaders, body: JSON.stringify(feedbackBody) }); expect(replay.status).toBe(200); expect(await replay.json()).toMatchObject({ duplicate: true, review_url: "https://example.com/public-review" });
+    expect((await call("/v1/public/reviews/feedback", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...feedbackBody, rating: 5 }) })).status).toBe(409);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM review_feedback WHERE request_id=?").bind(failed.id).first<{ total: number }>())?.total).toBe(1);
+    await expect(env.DB.prepare("UPDATE review_feedback SET rating=5 WHERE request_id=?").bind(failed.id).run()).rejects.toThrow(/immutable/);
+    await expect(env.DB.prepare("UPDATE review_requests SET email='tampered@example.com' WHERE id=?").bind(failed.id).run()).rejects.toThrow(/immutable/);
+    const unsubscribe = () => call("/v1/public/marketing/unsubscribe", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ token: unsubscribeToken }) });
+    expect((await unsubscribe()).status).toBe(200); expect((await unsubscribe()).status).toBe(200);
+    expect(await env.DB.prepare("SELECT status,basis,revision FROM communication_consents WHERE contact_id=?").bind(contactId).first()).toEqual({ status: "opted_out", basis: "manual_suppression", revision: 2 });
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='review_request.unsubscribed' AND entity_id=?").bind(contactId).first<{ total: number }>())?.total).toBe(1);
+    expect((await call("/v1/admin/review-requests", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ destination_id: destination.id, contact_id: contactId, subject: "Again", body_text: "No longer allowed.", confirmation: "SEND REVIEW REQUEST" }) })).status).toBe(409);
+    const backup = await call("/v1/admin/recovery/backup", { headers: adminHeaders }); const backupText = await backup.text();
+    expect(backup.status).toBe(200); expect((await call("/v1/admin/recovery/restore/validate", { method: "POST", headers: { ...adminHeaders, "content-type": "application/vnd.openoperator.backup+json" }, body: backupText })).status).toBe(200);
+    const revoke = () => call(`/v1/admin/review-destinations/${destination.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ status: "revoked", if_revision: destination.revision, confirmation: "REVOKE REVIEW DESTINATION" }) });
+    expect((await revoke()).status).toBe(200); expect((await revoke()).status).toBe(409);
+    expect((await env.DB.prepare("SELECT status,revision FROM review_destinations WHERE id=?").bind(destination.id).first())).toEqual({ status: "revoked", revision: 2 });
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='review_destination.revoked' AND entity_id=?").bind(destination.id).first<{ total: number }>())?.total).toBe(1);
+    outbound.mockRestore();
   });
 
   it("[marketing] freezes consented recipients, suppresses opt-outs, retries failures idempotently, and supports one-click unsubscribe", async () => {

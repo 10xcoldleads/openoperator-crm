@@ -44,7 +44,17 @@ Wrangler may return `incomplete input` while batching trigger-heavy migrations `
 
 ## 4. Configure secrets
 
-At minimum, generate unique values for the webhook encryption key, recovery encryption key, scheduler authentication, and the private intake-to-CRM hop. Store them with `wrangler secret put`; do not place them in JSON, source, CI logs, or GitHub variables exposed to forks.
+Generate independent random values for every enabled security boundary. Store them with `wrangler secret put`; do not place them in JSON, source, CI logs, command history, or GitHub variables exposed to forks.
+
+| Binding | Minimum | Required for |
+|---|---:|---|
+| `WEBHOOK_ENCRYPTION_KEY` | 24 characters | Encrypting workspace webhook, Resend, and provider credentials |
+| `RECOVERY_ENCRYPTION_KEY` | 32 characters | Encrypted backup export, validation, and restore |
+| `UNSUBSCRIBE_SIGNING_KEY` | 32 characters | Marketing recipient freezing, review-request feedback links, and immediate email opt-out |
+| `SCHEDULER_SECRET` | 32 characters | Authenticating internal scheduled-job requests; use the same value on the CRM and intake Workers |
+| `SITES_BYPASS_TOKEN` | 32 random bytes | The private intake-to-CRM service hop; configure only on the intake Worker and the platform route that validates `oai-sites-authorization` |
+
+Set each secret against the intended Worker configuration and verify the binding names in the Cloudflare dashboard before deployment. Generate values with a cryptographically secure password manager or operating-system generator; never reuse keys between rows. `RECOVERY_PREVIOUS_ENCRYPTION_KEYS` is only for a documented recovery-key rotation window and must not contain the current key. Marketing and Review requests remain truthfully disabled until `UNSUBSCRIBE_SIGNING_KEY` is configured; outbound email also requires an operator-created, server-verified Resend connection in the application.
 
 Configure `ADMIN_EMAILS` with real operator identities and put the CRM behind a Cloudflare Access self-hosted application that admits only those identities. Copy the Access application audience tag to `POLICY_AUD` and set `TEAM_DOMAIN` to the complete `https://<team>.cloudflareaccess.com` issuer. The Worker validates the Access JWT signature, issuer, audience, and email claim before converting it to an internal identity; it does not trust the email header on its own. Cloudflare recommends validating `Cf-Access-Jwt-Assertion` even when Access is in front of a Worker.
 

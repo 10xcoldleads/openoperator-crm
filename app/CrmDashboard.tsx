@@ -27,6 +27,7 @@ import PaymentsWorkspace from "./PaymentsWorkspace";
 import SurveysWorkspace from "./SurveysWorkspace";
 import SitesWorkspace from "./SitesWorkspace";
 import MarketingWorkspace from "./MarketingWorkspace";
+import ReviewRequestsWorkspace from "./ReviewRequestsWorkspace";
 
 const VisualAutomationBuilder = lazy(() => import("./VisualAutomationBuilder"));
 
@@ -725,7 +726,7 @@ type CommandEntry =
   | { id: string; kind: "contact"; label: string; description: string; record: Contact }
   | { id: string; kind: "company"; label: string; description: string; record: Company }
   | { id: string; kind: "opportunity"; label: string; description: string; record: Opportunity };
-type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "surveys" | "sites" | "marketing" | "booking" | "payments" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
+type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "surveys" | "sites" | "marketing" | "reviews" | "booking" | "payments" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
 type IntegrationDomain = "mailboxes" | "agents" | "sources" | "webhooks";
 type IntegrationCatalogView = "catalog" | "installed";
 type LeadView = "inbox" | "contacts" | "companies" | "visitors";
@@ -741,6 +742,7 @@ const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; gr
   { id: "surveys", label: "Surveys", icon: "Q", group: "Workspace" },
   { id: "sites", label: "Sites", icon: "S", group: "Workspace" },
   { id: "marketing", label: "Marketing", icon: "E", group: "Workspace" },
+  { id: "reviews", label: "Review requests", icon: "★", group: "Workspace" },
   { id: "booking", label: "Booking", icon: "B", group: "Workspace" },
   { id: "payments", label: "Payments", icon: "$", group: "Workspace", adminOnly: true },
   { id: "tasks", label: "Calendar & tasks", icon: "T", group: "Workspace" },
@@ -4838,6 +4840,7 @@ export default function CrmDashboard() {
       <SurveysWorkspace active={activeView === "surveys"} canAdmin={Boolean(canAdmin)}/>
       <SitesWorkspace active={activeView === "sites"} canAdmin={Boolean(canAdmin)}/>
       <MarketingWorkspace active={activeView === "marketing"} canAdmin={Boolean(canAdmin)}/>
+      <ReviewRequestsWorkspace active={activeView === "reviews"} canAdmin={Boolean(canAdmin)}/>
       <BookingWorkspace active={activeView === "booking"} canAdmin={Boolean(canAdmin)}/>
       <ReportingWorkspace active={activeView === "reports"}/>
       <PaymentsWorkspace active={activeView === "payments" && Boolean(canAdmin)}/>
