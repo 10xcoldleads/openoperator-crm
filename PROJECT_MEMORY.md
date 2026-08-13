@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, hosted-path Sites, and consent-aware Marketing email milestones to `main` on 2026-08-13. The current product baseline is PR #14 at `9a360d3`; PR #15 records its post-merge truth without changing product behavior.
+Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, Surveys, hosted-path Sites, consent-aware Marketing email, and governed first-party Review requests to `main`. The current product baseline is PR #17 at merge commit `056a93b` on 2026-08-14.
 
 Visible and functional:
 
@@ -46,13 +46,14 @@ Visible and functional:
 - Truthful first-party Reporting with bounded cohorts, permission-aware pipeline snapshots, and currency-separated values
 - Admin-only provider-neutral Payments register with immutable manual payment/refund/dispute/reversal events and currency-separated balances
 - Consent-aware plain-text Marketing campaigns with immutable recipient snapshots, verified Resend delivery, current-consent suppression, replay-safe retry/cancel evidence, and one-click unsubscribe
+- Governed first-party Review requests with immutable delivery evidence, rating-independent public-review routing, one private response, and immediate email opt-out
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
 Explicitly omitted from navigation on `main`:
 
 - Calendar-provider sync; payment processors, banking, invoices, payouts, settlements, FX conversion, and reconciliation
 - Social publishing
-- Reputation management
+- Third-party reputation-provider ownership, review ingestion/synchronization, and public replies
 - Full attribution, ads, and call reporting
 - Voice carrier and unrestricted chat agents
 
@@ -61,8 +62,8 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 ## Evidence at the baseline
 
 - GitHub PRs through #11: milestone PRs passed clean Ubuntu `verify`, CodeQL, and GitGuardian before merge.
-- Current local acceptance on the Payments branch: 36 rendered UI/security tests.
-- Worker/D1 acceptance: all 191 tests across stress, extended, domain, auth, MCP, and platform shards.
+- Current local acceptance: 40 rendered UI/security tests.
+- Worker/D1 acceptance: all 195 tests across isolated feature, stress, extended, domain, auth, MCP, and platform shards.
 - Edge ingestion: 25 tests.
 - TypeScript and ESLint: clean.
 - Dependency audit: zero known npm vulnerabilities at merge time.
@@ -97,7 +98,11 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Consent-aware Resend Marketing is proven on `main`; social marketing remains a separate omitted surface. The next product milestone must be independently oriented before implementation rather than inferred from HighLevel's navigation. If a later session is on a documentation-only branch, do not mistake that branch name for an active product workstream; use the repository state and this milestone sequence.
+Governed first-party Review requests are proven on `main`; third-party Reputation and social marketing remain separate omitted surfaces. The next product milestone is a bounded **Estimates and customer acknowledgement** lifecycle, selected because the capability map still lacks the customer-facing commercial document between an Opportunity and the proven manual Payments ledger. It must remain an estimate workflow, not a fabricated payment processor, e-signature product, invoice system, or legally binding contract platform.
+
+Estimate orientation for the next implementation branch: an admin creates a workspace-scoped draft linked to one real Contact and optionally one Opportunity, with seller identity, recipient identity, currency, expiry, notes, and 1–50 bounded line items using integer minor-unit prices and positive quantities. Totals are deterministic and currency-separated; no FX, tax-engine, or accounting claim is allowed. Publishing freezes an immutable numbered version and generates a separate, unguessable, hash-only, fragment-delivered customer access credential. The one-time raw link is shown only at publication and may be copied by the operator; automatic email delivery is deferred until a separately consented/transactional delivery contract is oriented. A public recipient can view only the frozen estimate and submit at most one replay-safe `acknowledged` or `declined` response with typed name, explicit privacy/data-use acknowledgement, optional bounded note, IP hash/rate/honeypot controls, and a prominent disclosure that this is not an electronic signature or contract execution. Admin evidence shows immutable versions and response timestamps. Revocation immediately disables public access without deleting history. Members may view only if existing object permissions allow the linked records; all draft/publish/revoke mutations are admin-only, optimistic, audited, workspace-scoped, and recovery-covered.
+
+Estimate first-slice boundaries: no PDF generation, e-signature, legal enforceability claim, invoice, tax calculation, discount engine, recurring billing, payment link, Stripe/provider action, deposit, checkout, accounting sync, email/SMS delivery, attachments, custom templates, negotiation threads, or remote document provider. A visible UI is allowed only after creation, version freeze, one-time secret handoff, public view/response, revoke, recovery, automated lifecycle/security proof, and desktop/mobile browser acceptance all pass.
 
 Review-request orientation on `agent/review-requests`: the next slice is a **first-party review request and private feedback lifecycle**, not a fabricated third-party reputation inbox. An admin configures a credential-free HTTPS public-review destination and business identity, then may send a bounded one-time plain-text request only to a real Contact with a current valid email and express email consent through the workspace's active verified Resend connection. Each request persists the exact destination/contact/email/message snapshot, provider receipt or redacted failure, retry count, and two separate purpose-bound credentials: one for private feedback and one for immediate email opt-out. Both tokens are fragment-delivered and hash-only at rest. Public feedback clearly states that it is private CRM data, never posts externally, and always exposes the same external review link regardless of rating; selective positive-review routing (“review gating”) is forbidden by the data model and renderer. A request accepts at most one immutable 1–5 rating plus optional bounded feedback with explicit privacy acknowledgement, replay-safe idempotency, honeypot/rate controls, and no implicit marketing consent. Opt-out atomically updates the authoritative communication consent to `opted_out`/`manual_suppression` and writes one replay-safe audit event. Admin evidence is bounded and workspace-scoped; members cannot configure destinations or send requests.
 
@@ -151,9 +156,9 @@ Marketing automated evidence on 2026-08-13: build, TypeScript, Twenty provenance
 
 ## Next milestone sequence
 
-1. Implement the bounded first-party review-request/private-feedback lifecycle exactly as oriented above, including delivery failure/retry, opt-out, immutable feedback, recovery, automated acceptance, and browser proof.
-2. Expose it as Review requests only after that complete evidence exists; continue to label third-party Reputation synchronization/replies as omitted.
-3. Preserve the proven Marketing email lifecycle and keep social marketing, review-network adapters, ads/call attribution, voice carrier, custom domains, calendar sync, and payment-provider surfaces omitted until each receives an independent contract and proof cycle.
+1. Implement the bounded Estimates and customer acknowledgement lifecycle exactly as oriented above: deterministic minor-unit totals, immutable publication, one-time hash-only access, one replay-safe non-signature response, immediate revoke, recovery, automated acceptance, and browser proof.
+2. Expose Estimates only after the complete evidence exists; continue to label e-signature, contracts, invoices, tax, checkout, and payment providers as omitted.
+3. Preserve the proven Marketing and Review-request lifecycles and keep social marketing, review-network adapters, ads/call attribution, voice carrier, custom domains, calendar sync, and payment-provider surfaces omitted until each receives an independent contract and proof cycle.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 
