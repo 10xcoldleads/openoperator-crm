@@ -977,6 +977,10 @@ describe("authorization and transport security", () => {
     expect((await call("/v1/admin/review-requests", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ destination_id: destination.id, contact_id: contactId, subject: "Again", body_text: "No longer allowed.", confirmation: "SEND REVIEW REQUEST" }) })).status).toBe(409);
     const backup = await call("/v1/admin/recovery/backup", { headers: adminHeaders }); const backupText = await backup.text();
     expect(backup.status).toBe(200); expect((await call("/v1/admin/recovery/restore/validate", { method: "POST", headers: { ...adminHeaders, "content-type": "application/vnd.openoperator.backup+json" }, body: backupText })).status).toBe(200);
+    const revoke = () => call(`/v1/admin/review-destinations/${destination.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ status: "revoked", if_revision: destination.revision, confirmation: "REVOKE REVIEW DESTINATION" }) });
+    expect((await revoke()).status).toBe(200); expect((await revoke()).status).toBe(409);
+    expect((await env.DB.prepare("SELECT status,revision FROM review_destinations WHERE id=?").bind(destination.id).first())).toEqual({ status: "revoked", revision: 2 });
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='review_destination.revoked' AND entity_id=?").bind(destination.id).first<{ total: number }>())?.total).toBe(1);
     outbound.mockRestore();
   });
 
