@@ -155,6 +155,7 @@ beforeEach(async () => {
 });
 
 describe("authorization and transport security", () => {
+  describe("[auth-domain] product and provider boundaries", () => {
   it("reports health without exposing CRM data", async () => {
     const response = await call("/v1/health");
     expect(response.status).toBe(200);
@@ -924,7 +925,7 @@ describe("authorization and transport security", () => {
     expect((await call(`/v1/public/sites/${created.slug}?path=/`)).status).toBe(404);
   });
 
-  it("freezes consented marketing recipients, suppresses opt-outs, retries failures idempotently, and supports one-click unsubscribe", async () => {
+  it("[marketing] freezes consented recipients, suppresses opt-outs, retries failures idempotently, and supports one-click unsubscribe", async () => {
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
       VALUES('mem_marketing_member','ws_openoperator','marketing-member@example.com','member',1,?)`).bind(now).run();
@@ -1316,6 +1317,9 @@ describe("authorization and transport security", () => {
     expect(stored?.sections).toContain("layout_first");
   });
 
+  });
+
+  describe("[auth-contract] generic transport boundaries", () => {
   it("rejects every private API family before parsing attacker-controlled bodies", async () => {
     const privateRequests: Array<[string, RequestInit | undefined]> = [
       ["/v1/admin/workspaces", undefined],
@@ -1635,6 +1639,7 @@ describe("authorization and transport security", () => {
       method, headers: { ...adminHeaders, ...jsonHeaders }, body: "{",
     })));
     expect(malformed.map((response) => response.status)).toEqual(Array(bodyRoutes.length).fill(400));
+  });
   });
 });
 
