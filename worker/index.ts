@@ -229,7 +229,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 30;
+const RECOVERY_SCHEMA_VERSION = 31;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -242,6 +242,7 @@ type RecoveryTable =
   | "forms" | "form_versions" | "form_submissions"
   | "surveys" | "survey_versions" | "survey_responses"
   | "sites" | "site_versions"
+  | "marketing_campaigns" | "marketing_campaign_versions" | "marketing_campaign_recipients"
   | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
   | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
@@ -284,6 +285,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   survey_responses: { columns: ["id", "workspace_id", "survey_id", "survey_version_id", "idempotency_key", "answers", "privacy_accepted", "started_at", "submitted_at", "duration_seconds", "ip_hash", "user_agent"] },
   sites: { columns: ["id", "workspace_id", "name", "slug", "status", "pages", "theme", "custom_domain", "domain_status", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   site_versions: { columns: ["id", "workspace_id", "site_id", "version", "pages", "theme", "published_by", "published_at"] },
+  marketing_campaigns: { columns: ["id", "workspace_id", "name", "status", "subject", "body_text", "contact_ids", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  marketing_campaign_versions: { columns: ["id", "workspace_id", "campaign_id", "version", "subject", "body_text", "selected_contact_ids", "exclusion_summary", "published_by", "published_at"] },
+  marketing_campaign_recipients: { columns: ["id", "workspace_id", "campaign_id", "campaign_version_id", "contact_id", "email", "first_name", "last_name", "consent_revision", "unsubscribe_token_hash", "status", "attempt_count", "provider_email_id", "response_status", "error", "sent_at", "updated_at"] },
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
@@ -2457,6 +2461,15 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
   }
   for (const row of tables.site_versions) requireReference("site_versions", row, "site_id", "sites");
   for (const row of tables.sites) requireReference("sites", row, "published_version_id", "site_versions", true);
+  for (const row of tables.marketing_campaign_versions) requireReference("marketing_campaign_versions", row, "campaign_id", "marketing_campaigns");
+  for (const row of tables.marketing_campaigns) requireReference("marketing_campaigns", row, "published_version_id", "marketing_campaign_versions", true);
+  for (const row of tables.marketing_campaign_recipients) {
+    requireReference("marketing_campaign_recipients", row, "campaign_id", "marketing_campaigns");
+    requireReference("marketing_campaign_recipients", row, "campaign_version_id", "marketing_campaign_versions");
+    requireReference("marketing_campaign_recipients", row, "contact_id", "contacts");
+    const version = tables.marketing_campaign_versions.find((candidate) => candidate.id === row.campaign_version_id);
+    if (version?.campaign_id !== row.campaign_id) throw new ApiError(400, "Marketing recipient version belongs to another campaign");
+  }
   for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
   for (const row of tables.booking_appointments) {
     requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
@@ -2583,6 +2596,35 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     siteVersionNumbers.add(identity);
     try { validateSitePages(JSON.parse(String(row.pages))); validateSiteTheme(JSON.parse(String(row.theme))); }
     catch { throw new ApiError(400, "Backup contains invalid site version content"); }
+  }
+  const campaignVersionNumbers = new Set<string>(); const unsubscribeHashes = new Set<string>();
+  for (const row of tables.marketing_campaigns) {
+    let contactIds: unknown;
+    try { contactIds = JSON.parse(String(row.contact_ids)); } catch { throw new ApiError(400, "Backup contains invalid marketing contacts"); }
+    if (!Array.isArray(contactIds) || contactIds.length > 25 || new Set(contactIds).size !== contactIds.length ||
+      contactIds.some((value) => typeof value !== "string" || !/^ct_[a-f0-9]{32}$/.test(value)) ||
+      !["draft", "ready", "sending", "completed", "cancelled"].includes(String(row.status)) ||
+      typeof row.name !== "string" || !row.name.trim() || String(row.name).length > 120 ||
+      typeof row.subject !== "string" || !row.subject.trim() || String(row.subject).length > 200 ||
+      typeof row.body_text !== "string" || !row.body_text.trim() || String(row.body_text).length > 10_000 ||
+      !Number.isInteger(row.revision) || Number(row.revision) < 1) throw new ApiError(400, "Backup contains an invalid marketing campaign");
+  }
+  for (const row of tables.marketing_campaign_versions) {
+    const identity = `${row.campaign_id}:${row.version}`; let selected: unknown; let excluded: unknown;
+    try { selected = JSON.parse(String(row.selected_contact_ids)); excluded = JSON.parse(String(row.exclusion_summary)); }
+    catch { throw new ApiError(400, "Backup contains invalid marketing version evidence"); }
+    if (campaignVersionNumbers.has(identity) || !Number.isInteger(row.version) || Number(row.version) < 1 ||
+      !Array.isArray(selected) || selected.length > 25 || !isPlainObject(excluded)) throw new ApiError(400, "Backup contains an invalid marketing version");
+    campaignVersionNumbers.add(identity);
+  }
+  for (const row of tables.marketing_campaign_recipients) {
+    if (unsubscribeHashes.has(String(row.unsubscribe_token_hash)) || !/^[a-f0-9]{64}$/.test(String(row.unsubscribe_token_hash)) ||
+      !validEmail(normalizeEmail(row.email)) || !Number.isInteger(row.consent_revision) || Number(row.consent_revision) < 1 ||
+      !["queued", "sending", "succeeded", "failed", "suppressed", "cancelled"].includes(String(row.status)) ||
+      !Number.isInteger(row.attempt_count) || Number(row.attempt_count) < 0 || Number(row.attempt_count) > 10) {
+      throw new ApiError(400, "Backup contains an invalid marketing recipient");
+    }
+    unsubscribeHashes.add(String(row.unsubscribe_token_hash));
   }
   const emails = new Set<string>();
   const redirectSources = new Set<string>();
@@ -8430,6 +8472,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM conversation_messages WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM marketing_campaign_recipients WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM marketing_campaign_versions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM marketing_campaigns WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM survey_responses WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM site_versions WHERE workspace_id=?").bind(workspaceId),

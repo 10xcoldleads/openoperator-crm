@@ -468,6 +468,37 @@ export const communicationConsents = sqliteTable("communication_consents", {
   index("communication_consents_workspace_status_idx").on(table.workspaceId, table.channel, table.status),
 ]);
 
+export const marketingCampaigns = sqliteTable("marketing_campaigns", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(), status: text("status", { enum: ["draft", "ready", "sending", "completed", "cancelled"] }).notNull().default("draft"),
+  subject: text("subject").notNull(), bodyText: text("body_text").notNull(), contactIds: text("contact_ids").notNull().default("[]"),
+  publishedVersionId: text("published_version_id"), revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(),
+  createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [index("marketing_campaigns_workspace_updated_idx").on(table.workspaceId, table.updatedAt, table.id)]);
+
+export const marketingCampaignVersions = sqliteTable("marketing_campaign_versions", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  campaignId: text("campaign_id").notNull().references(() => marketingCampaigns.id, { onDelete: "cascade" }), version: integer("version").notNull(),
+  subject: text("subject").notNull(), bodyText: text("body_text").notNull(), selectedContactIds: text("selected_contact_ids").notNull(),
+  exclusionSummary: text("exclusion_summary").notNull(), publishedBy: text("published_by").notNull(), publishedAt: text("published_at").notNull(),
+}, (table) => [uniqueIndex("marketing_campaign_versions_campaign_version_unique").on(table.workspaceId, table.campaignId, table.version)]);
+
+export const marketingCampaignRecipients = sqliteTable("marketing_campaign_recipients", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  campaignId: text("campaign_id").notNull().references(() => marketingCampaigns.id, { onDelete: "cascade" }),
+  campaignVersionId: text("campaign_version_id").notNull().references(() => marketingCampaignVersions.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "cascade" }), email: text("email").notNull(),
+  firstName: text("first_name"), lastName: text("last_name"), consentRevision: integer("consent_revision").notNull(),
+  unsubscribeTokenHash: text("unsubscribe_token_hash").notNull(),
+  status: text("status", { enum: ["queued", "sending", "succeeded", "failed", "suppressed", "cancelled"] }).notNull().default("queued"),
+  attemptCount: integer("attempt_count").notNull().default(0), providerEmailId: text("provider_email_id"), responseStatus: integer("response_status"),
+  error: text("error"), sentAt: text("sent_at"), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("marketing_campaign_recipients_version_contact_unique").on(table.workspaceId, table.campaignVersionId, table.contactId),
+  uniqueIndex("marketing_campaign_recipients_unsubscribe_hash_unique").on(table.unsubscribeTokenHash),
+  index("marketing_campaign_recipients_campaign_status_idx").on(table.workspaceId, table.campaignId, table.status, table.id),
+]);
+
 export const conversationThreads = sqliteTable("conversation_threads", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
