@@ -99,6 +99,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM form_submissions"),
     env.DB.prepare("DELETE FROM form_versions"),
     env.DB.prepare("DELETE FROM forms"),
+    env.DB.prepare("DELETE FROM survey_responses"),
+    env.DB.prepare("DELETE FROM survey_versions"),
+    env.DB.prepare("DELETE FROM surveys"),
     env.DB.prepare("DELETE FROM booking_appointments"),
     env.DB.prepare("DELETE FROM booking_availability_rules"),
     env.DB.prepare("DELETE FROM booking_calendars"),
@@ -828,6 +831,54 @@ describe("authorization and transport security", () => {
     expect(restrictedBody.source_first_touch.rows[0]).not.toHaveProperty("won_contacts");
   });
 
+  it("publishes immutable surveys and records replay-safe privacy-aware responses", async () => {
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_survey_member','ws_openoperator','survey-member@example.com','member',1,?)`).bind(now).run();
+    expect((await call("/v1/admin/surveys", { method: "POST", headers: { "oai-authenticated-user-email": "survey-member@example.com", ...jsonHeaders }, body: JSON.stringify({ name: "Denied", title: "Denied" }) })).status).toBe(403);
+    const createdResponse = await call("/v1/admin/surveys", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ name: "Workshop pulse", title: "Tell us what you learned" }) });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json() as { survey: { id: string; slug: string; revision: number } }).survey;
+    expect((await call(`/v1/public/surveys/${created.slug}`)).status).toBe(404);
+    const questions = [
+      { id: "rating", label: "Rate the workshop", type: "rating", required: true, options: [] },
+      { id: "topics", label: "Useful topics", type: "multi_choice", required: true, options: ["API", "MCP", "Browser"] },
+      { id: "notes", label: "What will you automate?", type: "long_text", required: false, options: [] },
+    ];
+    const updatedResponse = await call(`/v1/admin/surveys/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      name: "Workshop pulse", title: "Tell us what you learned", description: "Three short questions.", questions,
+      success_message: "Your feedback is recorded.", if_revision: created.revision,
+    }) });
+    expect(updatedResponse.status).toBe(200); const updated = (await updatedResponse.json() as { survey: { revision: number } }).survey;
+    const publishRace = await Promise.all([1, 2].map(() => call(`/v1/admin/surveys/${created.id}/publish`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ if_revision: updated.revision, confirmation: "PUBLISH SURVEY" }) })));
+    expect(publishRace.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM survey_versions WHERE survey_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    expect((await call(`/v1/public/surveys/${created.slug}`).then((response) => response.json()))).toMatchObject({ survey: { version: 1, questions }, privacy: { marketing_consent_requested: false } });
+    const responseBody = { answers: { rating: 5, topics: ["API", "Browser"], notes: "Whole workflows" }, privacy_accepted: true,
+      started_at: new Date(Date.now() - 5000).toISOString(), website: "", idempotency_key: "survey-response-test-1" };
+    expect((await call(`/v1/public/surveys/${created.slug}/responses`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...responseBody, privacy_accepted: false }) })).status).toBe(400);
+    expect((await call(`/v1/public/surveys/${created.slug}/responses`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...responseBody, answers: { ...responseBody.answers, rating: 9 } }) })).status).toBe(400);
+    const submitted = await call(`/v1/public/surveys/${created.slug}/responses`, { method: "POST", headers: { ...jsonHeaders, "cf-connecting-ip": "203.0.113.9" }, body: JSON.stringify(responseBody) });
+    expect(submitted.status).toBe(201); const responseId = (await submitted.json() as { response_id: string }).response_id;
+    expect((await call(`/v1/public/surveys/${created.slug}/responses`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(responseBody) })).status).toBe(200);
+    expect((await call(`/v1/public/surveys/${created.slug}/responses`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...responseBody, answers: { ...responseBody.answers, rating: 4 } }) })).status).toBe(409);
+    await expect(env.DB.prepare("UPDATE survey_responses SET answers='{}' WHERE id=?").bind(responseId).run()).rejects.toThrow(/immutable/);
+    const beforeDraftEdit = await call(`/v1/admin/surveys/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as { survey: { revision: number } };
+    expect((await call(`/v1/admin/surveys/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+      name: "Workshop pulse", title: "Tell us what you learned", description: "A changed draft.",
+      questions: [{ ...questions[0], label: "Changed draft label" }, ...questions.slice(1)], success_message: "Your feedback is recorded.", if_revision: beforeDraftEdit.survey.revision,
+    }) })).status).toBe(200);
+    const ledger = await call(`/v1/admin/surveys/${created.id}/responses`, { headers: adminHeaders }).then((response) => response.json()) as { responses: unknown[]; version_summaries: Array<{ version: number; response_count: number; summary: Array<Record<string, unknown>> }> };
+    expect(ledger.responses).toHaveLength(1); expect(ledger.version_summaries[0]).toMatchObject({ version: 1, response_count: 1 }); expect(ledger.version_summaries[0].summary).toEqual(expect.arrayContaining([
+      expect.objectContaining({ question_id: "rating", label: "Rate the workshop", answered: 1, average: 5 }),
+      expect.objectContaining({ question_id: "topics", counts: [{ option: "API", count: 1 }, { option: "MCP", count: 0 }, { option: "Browser", count: 1 }] }),
+    ]));
+    const detail = await call(`/v1/admin/surveys/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as { survey: { revision: number } };
+    expect((await call(`/v1/admin/surveys/${created.id}/revoke`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: detail.survey.revision, confirmation: "REVOKE SURVEY" }) })).status).toBe(200);
+    expect((await call(`/v1/public/surveys/${created.slug}`)).status).toBe(404);
+  });
+
   it("keeps a provider-neutral payment ledger immutable, replay-safe, currency-safe, and adjustment-bounded", async () => {
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
@@ -1304,6 +1355,11 @@ describe("authorization and transport security", () => {
       [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}/appointments`, "GET"],
       ["/v1/admin/reports/revenue-funnel", "GET"],
       ["/v1/admin/payments/ledger", "GET, POST"],
+      ["/v1/admin/surveys", "GET, POST"],
+      [`/v1/admin/surveys/survey_${"a".repeat(32)}`, "GET, PATCH"],
+      [`/v1/admin/surveys/survey_${"a".repeat(32)}/publish`, "POST"],
+      [`/v1/admin/surveys/survey_${"a".repeat(32)}/revoke`, "POST"],
+      [`/v1/admin/surveys/survey_${"a".repeat(32)}/responses`, "GET"],
       [`/v1/admin/payments/ledger/pay_${"a".repeat(32)}/adjustments`, "POST"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],

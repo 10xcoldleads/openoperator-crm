@@ -570,6 +570,32 @@ export const formSubmissions = sqliteTable("form_submissions", {
   index("form_submissions_form_recent_idx").on(table.workspaceId, table.formId, table.submittedAt, table.id),
 ]);
 
+export const surveys = sqliteTable("surveys", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(), slug: text("slug").notNull(), status: text("status", { enum: ["draft", "published", "revoked"] }).notNull().default("draft"),
+  title: text("title").notNull(), description: text("description").notNull().default(""), questions: text("questions").notNull(),
+  successMessage: text("success_message").notNull(), publishedVersionId: text("published_version_id"), revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("surveys_slug_unique").on(table.slug), index("surveys_workspace_updated_idx").on(table.workspaceId, table.updatedAt, table.id)]);
+
+export const surveyVersions = sqliteTable("survey_versions", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  surveyId: text("survey_id").notNull().references(() => surveys.id, { onDelete: "cascade" }), version: integer("version").notNull(),
+  title: text("title").notNull(), description: text("description").notNull(), questions: text("questions").notNull(), successMessage: text("success_message").notNull(),
+  publishedBy: text("published_by").notNull(), publishedAt: text("published_at").notNull(),
+}, (table) => [uniqueIndex("survey_versions_survey_version_unique").on(table.workspaceId, table.surveyId, table.version)]);
+
+export const surveyResponses = sqliteTable("survey_responses", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  surveyId: text("survey_id").notNull().references(() => surveys.id, { onDelete: "cascade" }),
+  surveyVersionId: text("survey_version_id").notNull().references(() => surveyVersions.id, { onDelete: "restrict" }),
+  idempotencyKey: text("idempotency_key").notNull(), answers: text("answers").notNull(), privacyAccepted: integer("privacy_accepted", { mode: "boolean" }).notNull(),
+  startedAt: text("started_at"), submittedAt: text("submitted_at").notNull(), durationSeconds: integer("duration_seconds"), ipHash: text("ip_hash"), userAgent: text("user_agent"),
+}, (table) => [
+  uniqueIndex("survey_responses_survey_idempotency_unique").on(table.workspaceId, table.surveyId, table.idempotencyKey),
+  index("survey_responses_survey_recent_idx").on(table.workspaceId, table.surveyId, table.submittedAt, table.id),
+]);
+
 export const bookingCalendars = sqliteTable("booking_calendars", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   name: text("name").notNull(), slug: text("slug").notNull(), status: text("status", { enum: ["draft", "published", "revoked"] }).notNull().default("draft"),

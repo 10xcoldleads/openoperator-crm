@@ -43,7 +43,7 @@ Visible and functional:
 - Versioned secure Forms with public intake, separate privacy/marketing choices, revocation, and submission evidence
 - Local-first Booking with governed publication, public availability, replay-safe booking, and private reschedule/cancel tokens
 - Truthful first-party Reporting with bounded cohorts, permission-aware pipeline snapshots, and currency-separated values
-- Admin-only provider-neutral Payments register with immutable manual payment/refund/dispute/reversal events and currency-separated balances (proven on the active branch; pending merge)
+- Admin-only provider-neutral Payments register with immutable manual payment/refund/dispute/reversal events and currency-separated balances
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
 Explicitly omitted from navigation:
@@ -59,7 +59,7 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Evidence at the baseline
 
-- GitHub PRs #1 and #7: `verify`, CodeQL, and security checks passed from clean Ubuntu checkouts.
+- GitHub PRs through #11: milestone PRs passed clean Ubuntu `verify`, CodeQL, and GitGuardian before merge.
 - Current local acceptance on the Payments branch: 36 rendered UI/security tests.
 - Worker/D1 acceptance: all 191 tests across stress, extended, domain, auth, MCP, and platform shards.
 - Edge ingestion: 25 tests.
@@ -91,21 +91,35 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 | Payment corrections are new immutable events | Money history is append-only: refunds, disputes, and reversals reference an original payment instead of rewriting it. |
 | Manual payment boundary precedes provider adapters | The CRM can truthfully record verified off-platform money events without pretending Stripe, banking, invoices, payouts, or settlements are connected. |
 | Payment retries are idempotent and adjustments are bounded atomically | Retries cannot duplicate money events; concurrent refunds/disputes cannot exceed the original payment, and reversals cannot exceed disputed value. |
+| Survey summaries are grouped by immutable publication version | Editing a draft cannot relabel, reorder, or reinterpret historical response evidence. |
+| Survey privacy acknowledgement is not marketing consent | Anonymous research responses record the required data-use acknowledgement but never create a communication opt-in or Contact implicitly. |
 
 ## Current workstream
 
-Active branch: `agent/payment-ledger`; PR not opened yet.
+Active branch: `agent/surveys`; no implementation PR yet.
 
-Booking merged through PR #9 and first-party Reporting through PR #10. The provider-neutral Payments milestone is implemented and locally proven on the active branch. It adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI. Pending work is remote review: commit, push, PR, clean Linux `verify`, CodeQL, and GitGuardian before merge.
+Booking merged through PR #9, first-party Reporting through PR #10, and provider-neutral Payments through PR #11. Payments is now on `main` at merge commit `387054bc518a6b13a75ed15661e3f54528b95b9e`; it adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI.
 
 Reporting evidence on 2026-08-13: `npm test` passed (35 rendered/runtime checks, all 190 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; npm audit reported zero vulnerabilities. Aggregation tests prove bounded range rejection, cohort exclusion, lifecycle/source grouping, currency separation, and opportunity-permission redaction. Edge proved filter changes, methodology disclosures, zero application console errors, and 390px body containment with an internally scrolling source register. PR #10 clean Linux `verify`, CodeQL, and GitGuardian passed before merge.
 
 Payments local evidence on 2026-08-13: `npm test` passed (36 rendered/runtime checks, all 191 Worker tests across six supported shards, and 25 ingestion tests); TypeScript, ESLint, Twenty provenance, and build passed; production `npm audit` reported zero vulnerabilities. Worker acceptance proves admin isolation, immutable rows, idempotent replay, provider-reference uniqueness, currency matching, atomic concurrent adjustment caps, audit atomicity, and recovery-table coverage. Edge proved a real $125.50 manual payment followed by a linked $25.50 refund, correct $100.00 net/$125.50 gross/$25.50 refunded balances, explicit no-provider/no-FX disclosures, zero application console errors, and 390px body containment with only the ledger tape scrolling internally. Browser QA also caught and drove the repair of a non-opening adjustment editor before this evidence was recorded.
 
+Payments remote evidence: PR #11 clean Linux `verify` passed in 4m31s; CodeQL analysis and result passed; GitGuardian passed; merged 2026-08-13 at `387054b`.
+
+The next vertical slice is Surveys, not a combined Sites/Surveys placeholder. It will have its own versioned definition and published snapshot, multi-step response lifecycle, replay-safe public submission, permission/audit/recovery contracts, and response ledger/summary. Secure Forms may supply proven validation and publication patterns, but survey responses and analytics require separate tables and APIs. Sites remains omitted until its page/version/domain/publication lifecycle is independently mapped and proven.
+
+Survey implementation on active branch: migration `0052_surveys_core.sql` and Drizzle schema define workspace-scoped drafts, immutable published versions, and immutable responses. Questions use stable operator-defined IDs and support bounded short text, long text, email, single choice, multiple choice, and 1–5 rating types. Admin APIs cover list/create/detail/edit/publish/revoke and bounded response evidence; mutations require an admin role, optimistic revisions, explicit lifecycle confirmation, and atomic audit. Public APIs expose only the active frozen snapshot and accept privacy-required, honeypot/rate-bounded, replay-safe anonymous answers. Response summaries are grouped by the immutable publication version rather than the current draft, and the UI exposes both version summaries and a bounded recent-response ledger. Recovery schema version 29 validates survey references, slugs, versions, replay keys, question shape, privacy, timestamps, and duration.
+
+Survey local evidence on 2026-08-13: build, TypeScript, ESLint, Twenty provenance, and 37 rendered/runtime tests pass. All 192 Worker tests pass across stress, extended, domain, authorization/transport, MCP, and platform-data shards; the focused lifecycle test proves member mutation denial, draft invisibility, a 200/409 concurrent publish race, one immutable version, no marketing-consent request, invalid privacy/rating rejection, idempotent replay and mismatch conflict, immutable response rows, version-faithful summaries after a later draft edit, and immediate revoke. Ingestion acceptance passes 25/25 and production `npm audit --omit=dev` reports zero vulnerabilities.
+
+Survey Edge acceptance: an admin created `Browser acceptance pulse`, saved its introduction, used the two-step publication control, and opened its frozen V1 public route. The public page displayed the required rating and separate privacy acknowledgement with the explicit text `No marketing consent is requested`, accepted a real 5/5 response, and rendered its success state. The admin response evidence then showed one V1 response, a 5.0/5 aggregate, and the recent immutable response entry. At 390px, the public page reported `innerWidth=scrollWidth=bodyWidth=390`; the admin page reported `innerWidth=390`, `bodyWidth=scrollWidth=375`, and a 323px survey layout. Both pages had zero application-origin console errors. Browser QA initially failed because a build hot reload left the local Worker without a generated RSC manifest; restarting from the completed build restored the server and proved the final journey.
+
+PR #12 is open at `https://github.com/10xcoldleads/openoperator-crm/pull/12` from branch `agent/surveys`. On commit `3b90dec`, clean Linux `verify` passed in 4m51s; CodeQL analysis and result passed; GitGuardian passed. The PR is ready for merge after this evidence-only memory update receives equivalent gates.
+
 ## Next milestone sequence
 
-1. Finish Payments remote gates and merge the provider-neutral ledger; provider adapters remain a later independent slice.
-2. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
+1. Surveys: separate versioned publish/respond lifecycle and response evidence; do not relabel Forms.
+2. Sites: independent page/version/publication/domain lifecycle after Surveys.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 
