@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation and Conversations milestones to `main` on 2026-08-13; current main before the Forms branch is `6da9d89` through PR #7.
+Merged foundation, Conversations, and secure Forms milestones to `main` on 2026-08-13; current main before the Booking branch is `168decc` through PR #8.
 
 Visible and functional:
 
@@ -40,11 +40,12 @@ Visible and functional:
 - Scoped agent credentials, MCP discovery/execution, work queues, proposals, human decisions, and audit history
 - Source credentials, webhooks, mailbox metadata, Resend transactional delivery, operations health, encrypted recovery, and launch readiness
 - Consent-aware Conversations with persisted email threads, explicit mailbox sync, delivery receipts, permission/suppression evidence, and replay-safe Resend sending
+- Versioned secure Forms with public intake, separate privacy/marketing choices, revocation, and submission evidence
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
 Explicitly omitted from navigation:
 
-- Public booking and calendar-provider sync
+- Calendar-provider sync (public local-first Booking is implemented on the active branch)
 - Sites and surveys builders
 - Payments and reconciliation
 - Marketing/social publishing
@@ -57,8 +58,8 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 ## Evidence at the baseline
 
 - GitHub PRs #1 and #7: `verify`, CodeQL, and security checks passed from clean Ubuntu checkouts.
-- Current local acceptance before Forms release: 33 rendered UI/security tests.
-- Worker/D1 acceptance: all 188 tests across stress, extended, domain, auth, MCP, and platform shards.
+- Current local acceptance before Booking release: 34 rendered UI/security tests.
+- Worker/D1 acceptance: all 189 tests across stress, extended, domain, auth, MCP, and platform shards.
 - Edge ingestion: 25 tests.
 - TypeScript and ESLint: clean.
 - Dependency audit: zero known npm vulnerabilities at merge time.
@@ -80,21 +81,22 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 | Immutable published form versions | A draft edit cannot retroactively change the fields or consent language a submitter saw. |
 | Separate privacy acknowledgement and optional marketing consent | A service request is not treated as marketing permission; opt-out suppression always wins. |
 | Public forms are write-only by slug | Visitors can fetch only the active published snapshot and submit bounded values; CRM data and draft history remain private. |
+| Booking management tokens are fragment-delivered and hash-only at rest | Private management credentials stay out of server logs and cannot be recovered from D1. |
+| Local-first booking provider boundary | A working self-hosted calendar is truthful today; external sync remains explicitly false until a real adapter is implemented. |
 
 ## Current workstream
 
-Branch to publish: `agent/secure-forms`.
+Branch to publish: `agent/booking-core`.
 
-Milestone completed locally: secure Forms includes editable drafts, immutable published versions, globally shareable public slugs, public responsive rendering, required privacy acknowledgement, separately optional express-email consent, deterministic contact association, activity evidence, replay protection, per-form/IP throttling, honeypot handling, immediate revoke behavior, submission history, optimistic concurrency, atomic audits, and recovery schema version 26. Forms may remain visible because its primary admin-to-public journey passed. Publish and merge only through green CI.
+Milestone completed locally: Booking includes draft/publish/revoke lifecycle, timezone-aware weekly availability, duration/buffer/notice/horizon controls, unauthenticated public booking, replay and double-booking conflict guards, hashed private management tokens, reschedule/cancel, contact/activity/audit evidence, appointment ledger, an explicit local-only provider boundary, and recovery schema version 27. Booking may remain visible because its primary admin-to-public-to-management journey passed. Publish and merge only through green CI.
 
-Evidence on 2026-08-13: `npm test` passed (33 rendered/runtime checks, all 188 worker tests across six shards, 25 ingestion tests); `npm run lint` passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Edge acceptance proved draft creation, publish confirmation, unauthenticated public rendering, consent-aware submission, CRM ledger visibility, zero public console errors, and a 390px public layout without horizontal overflow. Concurrent publish testing proved one version and one audit winner.
+Evidence on 2026-08-13: `npm test` passed (34 rendered/runtime checks, all 189 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. The Booking acceptance test proves authorization, publish race behavior, one audit winner, local-only provider truth, privacy acknowledgement, honeypot behavior, simultaneous booking conflict, idempotent replay, hash-only token storage, token authorization, cancel race behavior, slot reopening, revoke, and ledger history. Edge acceptance proved admin creation/publish, public availability and submission, private reschedule/cancel, zero application console errors, and a visually responsive 390px emulation. Clean Linux CI and PR merge remain required.
 
 ## Next milestone sequence
 
-1. Booking: availability rules, public booking, conflict prevention, cancellation/reschedule, provider adapter boundary.
-2. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
-3. Payments: provider-neutral ledger before any Stripe surface.
-4. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
+1. Reporting slices: only reports backed by real first-party data, beginning with funnel/source and pipeline conversion.
+2. Payments: provider-neutral ledger before any Stripe surface.
+3. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 

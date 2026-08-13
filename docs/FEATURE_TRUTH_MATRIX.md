@@ -7,7 +7,8 @@ This matrix is the release contract for the open-source HighLevel-style workspac
 | Dashboard | Live metrics, briefing, scoring, pipeline snapshot, record drill-down | Visible | Add configurable dashboard widgets only with persisted layouts |
 | Contacts | Create, search, filter, save views, bulk edit, import/rollback, companies, custom fields, timelines | Visible | Continue browser acceptance across import and duplicate-resolution failures |
 | Opportunities | Multiple pipelines, stage rules, drag/keyboard movement, editing, tasks, agent proposals, concurrency guards | Visible | Add forecast views only after API and acceptance tests exist |
-| Calendar & tasks | Task CRUD/lifecycle plus bounded calendar range API and linked records | Visible | Public booking pages and provider sync remain omitted |
+| Calendar & tasks | Task CRUD/lifecycle plus bounded calendar range API and linked records | Visible | This module remains task-centric; Booking is a separate lifecycle |
+| Booking | Draft/publish/revoke calendars, timezone-aware availability, buffers/notices, public booking, replay/conflict protection, private reschedule/cancel, appointment ledger, and hash-only management tokens | Visible | External calendar sync is explicitly local-only/false until a real provider adapter exists |
 | Agent work | Scoped credentials, work queue, proposals, approvals, execution results, audit trail | Visible | Voice and unrestricted chat agents remain omitted |
 | Automations | Versioned deterministic workflow builder, validation, activation, run history, repair paths | Visible | Campaign messaging remains omitted until provider and consent policy exist |
 | App connections | Governed sources, webhooks, mailboxes, agent credentials, health checks, revoke/rotate paths | Visible | Provider-specific setup wizards are added one tested adapter at a time |
