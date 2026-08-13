@@ -4788,7 +4788,7 @@ export default function CrmDashboard() {
 
   return <main className="crm-shell">
     <aside className="sidebar">
-      <div className="brand"><span>CR</span><b>CLAW<em>REVOPS</em><small>AGENTIC CRM</small></b></div>
+      <div className="brand"><span>OO</span><b>OPEN<em>OPERATOR</em><small>AGENTIC CRM</small></b></div>
       <nav aria-label="CRM workspace">
         {workspaceViews.map((view, index) => <button key={view.id} className={activeView === view.id ? "active" : ""} aria-label={view.label} title={view.label} aria-current={activeView === view.id ? "page" : undefined} onClick={() => { setActiveView(view.id); setError(""); setNotice(""); if (view.id === "agent") void load(); }}>
           <i aria-hidden="true">{view.icon}</i><span>{view.label}</span><small>{String(index + 1).padStart(2, "0")}</small>

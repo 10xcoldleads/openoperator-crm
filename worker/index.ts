@@ -35,6 +35,12 @@ interface FrameworkEnv extends Env {
 }
 
 async function authenticatedRequest(request: Request, env: FrameworkEnv): Promise<Request> {
+  if (env.ALLOW_INSECURE_LOCAL_AUTH === "true") {
+    if (request.headers.get("oai-authenticated-user-email")) return request;
+    const local = new Request(request);
+    local.headers.set("oai-authenticated-user-email", "owner@example.com");
+    return local;
+  }
   if (env.TEAM_DOMAIN && env.POLICY_AUD) {
     const token = request.headers.get("cf-access-jwt-assertion");
     if (!token) throw new ApiError(401, "Cloudflare Access authentication required");
@@ -59,12 +65,6 @@ async function authenticatedRequest(request: Request, env: FrameworkEnv): Promis
       console.warn("Cloudflare Access JWT validation failed", error instanceof Error ? error.message : "unknown error");
       throw new ApiError(401, "Invalid Cloudflare Access authentication");
     }
-  }
-  if (env.ALLOW_INSECURE_LOCAL_AUTH === "true") {
-    if (request.headers.get("oai-authenticated-user-email")) return request;
-    const local = new Request(request);
-    local.headers.set("oai-authenticated-user-email", "owner@example.com");
-    return local;
   }
   throw new ApiError(503, "Authentication is not configured");
 }
