@@ -3329,7 +3329,8 @@ async function automationRunCancelAuditStatement(
   request: Request,
   runId: string,
   before: unknown,
-  finishedAt: string,
+  expectedStatus: "running" | "canceled",
+  finishedAt: string | null,
 ) {
   const ip = request.headers.get("cf-connecting-ip");
   const ipHash = ip ? await sha256(ip) : null;
@@ -3338,9 +3339,10 @@ async function automationRunCancelAuditStatement(
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'automation_run.canceled','automation_run',?,?,?,?,?,?
     WHERE EXISTS(SELECT 1 FROM automation_runs
-      WHERE workspace_id=? AND id=? AND status='canceled' AND finished_at=?)`)
+      WHERE workspace_id=? AND id=? AND status=? AND (? IS NULL OR finished_at=?))`)
     .bind(id("audit"), access.workspaceId, access.email, runId, JSON.stringify(before), JSON.stringify(after),
-      requestId(request), ipHash, finishedAt, access.workspaceId, runId, finishedAt);
+      requestId(request), ipHash, finishedAt || new Date().toISOString(), access.workspaceId, runId,
+      expectedStatus, finishedAt, finishedAt);
 }
 
 async function agentWorkItemRequeueAuditStatement(
@@ -9412,13 +9414,22 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
         return json({ error: "This run is still inside its five-minute execution lease", code: "run_still_active" }, 409);
       }
       const finishedAt = new Date().toISOString();
-      const canceled = await env.DB.batch([
-        env.DB.prepare(`UPDATE automation_runs SET status='canceled',error=?,finished_at=?
-          WHERE workspace_id=? AND id=? AND status='running' AND started_at<=?`)
-          .bind(`Canceled as stale by ${access.email}`, finishedAt, workspaceId, runId, staleBefore),
-        await automationRunCancelAuditStatement(env, access, request, runId, before, finishedAt),
-      ]);
-      if (!canceled[0].meta.changes) return json({ error: "Automation run changed before cancellation", code: "run_conflict" }, 409);
+      let canceled: D1Result<unknown>[];
+      try {
+        canceled = await env.DB.batch([
+          await automationRunCancelAuditStatement(env, access, request, runId, before, "running", null),
+          env.DB.prepare(`UPDATE automation_runs SET status='canceled',error=?,finished_at=?
+            WHERE workspace_id=? AND id=? AND status='running' AND started_at<=?`)
+            .bind(`Canceled as stale by ${access.email}`, finishedAt, workspaceId, runId, staleBefore),
+          env.DB.prepare("INSERT INTO atomic_mutation_guard(ok) SELECT 0 WHERE changes()=0"),
+        ]);
+      } catch (error) {
+        if (String(error).includes("atomic_mutation_must_win")) {
+          return json({ error: "Automation run changed before cancellation", code: "run_conflict" }, 409);
+        }
+        throw error;
+      }
+      if (!canceled[1].meta.changes) return json({ error: "Automation run changed before cancellation", code: "run_conflict" }, 409);
       return json({ ok: true, run: { ...before, status: "canceled", error: `Canceled as stale by ${access.email}`, finished_at: finishedAt } });
     }
 
