@@ -1,0 +1,308 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "twentyhq/twenty",
+    "commit": "1f55234d0bd1abe20e5615dc5830b254a54831ef"
+  },
+  "policy": {
+    "integration_model": "source-pinned contract adaptation",
+    "runtime_dependency": false,
+    "copied_upstream_code": false,
+    "statement": "OpenOperator adapts bounded product and safety contracts to its Cloudflare-native architecture. This manifest does not claim binary compatibility or direct execution of Twenty modules."
+  },
+  "integrations": [
+    {
+      "id": "workflow-structure-and-lineage",
+      "upstream": [
+        {
+          "path": "packages/twenty-shared/src/workflow/validation/validate-workflow-structure.util.ts",
+          "blob_sha": "22f697f527b77ec52e152b1c23173a0849ef5059",
+          "export": "validateWorkflowStructure"
+        },
+        {
+          "path": "packages/twenty-shared/src/workflow/validation/utils/build-workflow-graph.util.ts",
+          "blob_sha": "085844a0db571dd5c18298ef6e908d4be3005fc6",
+          "export": "buildWorkflowGraph"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "function validateAutomationDefinition"
+        },
+          {
+            "path": "worker/index.ts",
+            "contains": "validateAutomationTemplate"
+          },
+          {
+            "path": "worker/index.ts",
+            "contains": "function validateAutomationCustomMetadata"
+          },
+          {
+            "path": "worker/index.ts",
+            "contains": "function automationDefinitionHealth"
+          }
+      ],
+      "behavioral_tests": [
+          {
+            "path": "tests/crm.worker.test.ts",
+            "contains": "persists stable typed step outputs and rejects unsafe workflow lineage"
+          },
+          {
+            "path": "tests/crm.worker.test.ts",
+            "contains": "runs automation with typed custom fields and fails closed after metadata drift"
+          }
+        ],
+        "adaptation": "Validate trigger/action structure, governed typed custom-field conditions/actions/merge variables, signed field-read authority, stable step identity, reachable prior-step outputs, explicit archival-drift health, and unsafe lineage before persistence or execution."
+    },
+    {
+      "id": "one-time-webhook-secret",
+      "upstream": [
+        {
+          "path": "packages/twenty-server/src/engine/metadata-modules/webhook/utils/generate-webhook-secret.util.ts",
+          "blob_sha": "a163a273d82ef718f0a7319c65012fc132db71f0",
+          "export": "generateWebhookSecret"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "const secret = `whsec_"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "encryptSecret"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "blocks SSRF-shaped webhook destinations and keeps one-time secrets out of reads"
+        }
+      ],
+      "adaptation": "Generate high-entropy one-time webhook credentials, return them only at creation, encrypt at rest, and expose only a prefix thereafter."
+    },
+    {
+      "id": "sanitized-webhook-event-envelope",
+      "upstream": [
+        {
+          "path": "packages/twenty-server/src/engine/metadata-modules/webhook/utils/transform-event-to-webhook-event.ts",
+          "blob_sha": "c0397069c4b5102139d929f416195622d960aefa",
+          "export": "transformEventToWebhookEvent"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "async function prepareWorkflowEvent"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "const safeRecord = recordType"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "publishes fixed signed workflow events through matching workspace webhook subscriptions"
+        },
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "verifies inbound webhook signatures and suppresses replayed events"
+        }
+      ],
+      "adaptation": "Server-build a fixed record envelope, exclude endpoint secrets and model-controlled destinations, sign delivery, and suppress replay."
+    },
+    {
+      "id": "review-first-record-merge",
+      "upstream": [
+        {
+          "path": "packages/twenty-front/src/modules/object-record/record-merge/utils/mergeRelationshipData.ts",
+          "blob_sha": "69f9c7d163fe7f5b8440a6c72e467c5580067596",
+          "export": "mergeRecordRelationshipData"
+        },
+        {
+          "path": "packages/twenty-front/src/modules/object-record/record-merge/hooks/usePerformMergePreview.ts",
+          "blob_sha": "48bb914f9dbda4ec90b9e88f68883470f90c8c13",
+          "export": "usePerformMergePreview"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "company-merge-review:v1"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "company_redirects"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "renames, merges, edits, and deletes company identity data with one-winner guards"
+        }
+      ],
+      "adaptation": "Preview relationship impact before merge, bind approval to a signed versioned review, atomically move relationships, and retain durable redirects."
+    },
+    {
+      "id": "versioned-permissioned-saved-views",
+      "upstream": [
+        {
+          "path": "packages/twenty-shared/src/application/viewManifestType.ts",
+          "blob_sha": "e6b59d72b0c0aafc9e17cc364caa1d484f81c3e0",
+          "export": "ViewManifest"
+        },
+        {
+          "path": "packages/twenty-shared/src/application/viewManifestType.ts",
+          "blob_sha": "e6b59d72b0c0aafc9e17cc364caa1d484f81c3e0",
+          "export": "ViewFilterManifest"
+        },
+        {
+          "path": "packages/twenty-server/src/engine/metadata-modules/view-permissions/services/view-access.service.ts",
+          "blob_sha": "66a6e496fb0aee475e294480a0b3ae207e4c8bed",
+          "export": "ViewAccessService"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "function validateSavedViewDefinition"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "Only workspace admins can publish shared views"
+        },
+        {
+          "path": "app/CrmDashboard.tsx",
+          "contains": "VISIBLE FIELDS"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "validateContactCustomFilters"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "versions saved views with private/shared isolation, bounded definitions, atomic audit, and one concurrent winner"
+        },
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "filters and displays governed custom fields without permission inference or saved-view drift"
+        }
+      ],
+      "adaptation": "Persist a bounded contact-view definition with typed core/custom filters, ordered permission-aware fields, sort, and visibility; execute filters on the server without inference through unreadable fields; conceal private views; sanitize shared-view drift; permission shared publishing; and bind edits and deletion to optimistic revisions with atomic audit evidence."
+    },
+    {
+      "id": "governed-custom-field-update-permissions",
+      "upstream": [
+        {
+          "path": "packages/twenty-shared/src/application/roleManifestType.ts",
+          "blob_sha": "b1b4af926b0653be04fc9fb4d2d2f58090ebd03a",
+          "export": "FieldPermissionManifest"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "memberContactGrantContract"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "update_custom_field"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "readableContactCustomFieldKeys"
+        },
+        {
+          "path": "app/CrmDashboard.tsx",
+          "contains": "GOVERNED CUSTOM FIELDS"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "binds member custom-field edits to active governed definitions and exact versioned grants"
+        },
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "redacts member custom-field values and definitions consistently across every Contact read surface"
+        }
+      ],
+      "adaptation": "Bind each active governed Contact field to explicit member read and update capabilities, redact ungranted values and definitions on every operator read surface, preserve owner/admin full access, require object-update authority plus the exact edit grant, and remove archived fields from the effective policy contract."
+    },
+    {
+      "id": "versioned-metadata-page-layouts",
+      "upstream": [
+        {
+          "path": "packages/twenty-shared/src/application/pageLayoutManifestType.ts",
+          "blob_sha": "687c130e1d38e6ff25a69e4f28627959da55956a",
+          "export": "PageLayoutManifest"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "worker/index.ts",
+          "contains": "function parsePageLayoutSections"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "effectivePageLayout"
+        },
+        {
+          "path": "app/CrmDashboard.tsx",
+          "contains": "RECORD PAGE LAYOUT"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "governs versioned object page layouts with safe drift recovery and exact conflicts"
+        }
+      ],
+      "adaptation": "Persist one bounded, ordered custom-field layout per core object; require complete active-field placement on writes; expose a drift-safe effective layout for new and archived fields; and guard admin changes with optimistic revisions and atomic audit evidence."
+    },
+    {
+      "id": "bounded-cross-object-calendar",
+      "upstream": [
+        {
+          "path": "packages/twenty-front/src/modules/object-record/record-calendar/month/hooks/useRecordCalendarMonthDaysRange.tsx",
+          "blob_sha": "b5a21e3bef3cc7c58abb93c7c3936db02dae6b55",
+          "export": "useRecordCalendarMonthDaysRange"
+        },
+        {
+          "path": "packages/twenty-front/src/modules/object-record/record-calendar/month/utils/getRecordCalendarDateRangeOverlapFilter.ts",
+          "blob_sha": "e68114e35f5acfe0053170baccfbfc0c7f4723f8",
+          "export": "getRecordCalendarDateRangeOverlapFilter"
+        }
+      ],
+      "local_contracts": [
+        {
+          "path": "app/CrmDashboard.tsx",
+          "contains": "const calendarMonthRange"
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "url.pathname === \"/v1/admin/calendar\""
+        },
+        {
+          "path": "worker/index.ts",
+          "contains": "limits: { per_kind: 200, total: 500 }"
+        }
+      ],
+      "behavioral_tests": [
+        {
+          "path": "tests/crm.worker.test.ts",
+          "contains": "serves a bounded workspace calendar across tasks, follow-ups, and opportunity closes"
+        },
+        {
+          "path": "tests/rendered-html.test.mjs",
+          "contains": "renders a bounded responsive CRM calendar inside Tasks"
+        }
+      ],
+      "adaptation": "Render a six-week month over a server-owned, end-exclusive date range; combine open tasks, contact follow-ups, and open opportunity close dates without open-world object queries; enforce workspace isolation, 93-day admission, 200-per-kind fairness, 500-total truncation, read-only untrusted-record labeling, linked-record navigation, and a compact mobile agenda."
+    }
+  ]
+}

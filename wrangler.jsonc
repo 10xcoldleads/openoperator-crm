@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "openoperator-crm",
+  "main": "./dist/server/index.js",
+  "compatibility_date": "2026-08-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "vars": {
+    "ADMIN_EMAILS": "owner@example.com",
+    "TEAM_DOMAIN": "https://your-team.cloudflareaccess.com",
+    "POLICY_AUD": "replace-with-your-access-application-audience"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.05 }
+  }
+}

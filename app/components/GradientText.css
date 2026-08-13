@@ -1,0 +1,80 @@
+.animated-gradient-text {
+  position: relative;
+  display: inline-flex;
+  max-width: fit-content;
+  align-items: center;
+  justify-content: center;
+  border-radius: 1.25rem;
+  overflow: hidden;
+  vertical-align: bottom;
+  --gradient-size: 300% 100%;
+  --gradient-angle: to right;
+}
+
+.animated-gradient-text.with-border {
+  padding: 0.35rem 0.75rem;
+}
+
+.gradient-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background-image: linear-gradient(var(--gradient-angle), var(--gradient-colors));
+  background-size: var(--gradient-size);
+  animation: gradient-text-shift var(--gradient-speed) linear infinite var(--gradient-direction);
+}
+
+.gradient-overlay::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  transform: translate(-50%, -50%);
+  border-radius: inherit;
+  background: #f5f6f8;
+}
+
+.text-content {
+  position: relative;
+  z-index: 2;
+  display: inline-block;
+  color: transparent;
+  background-clip: text;
+  -webkit-background-clip: text;
+  background-image: linear-gradient(var(--gradient-angle), var(--gradient-colors));
+  background-size: var(--gradient-size);
+  background-repeat: repeat;
+  animation: gradient-text-shift var(--gradient-speed) linear infinite var(--gradient-direction);
+}
+
+.animated-gradient-text.gradient-vertical {
+  --gradient-size: 100% 300%;
+  --gradient-angle: to bottom;
+}
+
+.animated-gradient-text.gradient-diagonal {
+  --gradient-size: 300% 300%;
+  --gradient-angle: to bottom right;
+}
+
+.animated-gradient-text.pause-on-hover:hover .text-content,
+.animated-gradient-text.pause-on-hover:hover .gradient-overlay {
+  animation-play-state: paused;
+}
+
+@keyframes gradient-text-shift {
+  from { background-position: 0 50%; }
+  to { background-position: 100% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animated-gradient-text .text-content,
+  .animated-gradient-text .gradient-overlay {
+    animation: none;
+    background-position: 0 50%;
+  }
+}
