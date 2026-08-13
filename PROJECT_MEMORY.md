@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, local-first Booking, and truthful first-party Reporting milestones to `main` on 2026-08-13; current main is `3a8e123` through PR #10.
+Merged foundation, Conversations, secure Forms, local-first Booking, truthful first-party Reporting, provider-neutral Payments, and Surveys milestones to `main` on 2026-08-13; current main is `cdaf156` through PR #12. Sites is the active independently proven vertical slice on `agent/sites`.
 
 Visible and functional:
 
@@ -41,14 +41,15 @@ Visible and functional:
 - Source credentials, webhooks, mailbox metadata, Resend transactional delivery, operations health, encrypted recovery, and launch readiness
 - Consent-aware Conversations with persisted email threads, explicit mailbox sync, delivery receipts, permission/suppression evidence, and replay-safe Resend sending
 - Versioned secure Forms with public intake, separate privacy/marketing choices, revocation, and submission evidence
+- Versioned Surveys with six bounded question types, immutable responses, privacy acknowledgement, version-faithful summaries, and immediate revoke
 - Local-first Booking with governed publication, public availability, replay-safe booking, and private reschedule/cancel tokens
 - Truthful first-party Reporting with bounded cohorts, permission-aware pipeline snapshots, and currency-separated values
 - Admin-only provider-neutral Payments register with immutable manual payment/refund/dispute/reversal events and currency-separated balances
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
-Explicitly omitted from navigation:
+Explicitly omitted from navigation on `main`:
 
-- Sites and surveys builders
+- Sites until the active branch completes its remote merge gates
 - Calendar-provider sync; payment processors, banking, invoices, payouts, settlements, FX conversion, and reconciliation
 - Marketing/social publishing
 - Reputation management
@@ -96,7 +97,7 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 
 ## Current workstream
 
-Active branch: `agent/surveys`; no implementation PR yet.
+Active branch: `agent/sites`; implementation is complete locally and awaiting the final full gate, commit, pull request, and clean Linux merge evidence.
 
 Booking merged through PR #9, first-party Reporting through PR #10, and provider-neutral Payments through PR #11. Payments is now on `main` at merge commit `387054bc518a6b13a75ed15661e3f54528b95b9e`; it adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI.
 
@@ -118,12 +119,16 @@ Survey remote evidence: PR #12 clean Linux `verify` passed in 4m36s on the final
 
 Sites orientation on active branch `agent/sites`: the first release is an explicitly hosted-path builder, not a custom-domain product. It needs workspace-scoped sites, ordered pages, immutable publication versions, bounded component schemas, SEO metadata, public rendering, admin-only revision/audit lifecycle, recovery contracts, responsive proof, and immediate revoke. Domain fields may be modeled only as inactive/verification-pending metadata until authoritative DNS ownership, collision prevention, TLS/route provisioning, and removal are all implemented and tested. Arbitrary HTML/JavaScript, uploads, analytics injection, custom CSS, commerce, blogs, memberships, and custom domains remain false for the first slice.
 
-Sites foundation: migration `0053_sites_core.sql`, Drizzle models, and recovery schema version 30 now define workspace-scoped site drafts and immutable publication snapshots. A site contains 1–10 uniquely pathed pages; each page contains 1–20 ordered, stable-ID components from a closed `hero`, `text`, `features`, or `cta` schema. Text, item counts, links, page paths, theme colors, and font choices are bounded. Links accept only same-site relative paths or credential-free HTTPS URLs. Custom domains are forced to `null`/`disabled` by recovery validation because routing and ownership proof are not implemented. TypeScript passes this foundation; APIs, UI, lifecycle tests, and browser proof remain pending, so Sites remains omitted from navigation.
+Sites implementation: migration `0053_sites_core.sql`, Drizzle models, and recovery schema version 30 define workspace-scoped site drafts and immutable publication snapshots. A site contains 1–10 uniquely pathed pages; each page contains 1–20 ordered, stable-ID components from a closed `hero`, `text`, `features`, or `cta` schema. Text, item counts, links, page paths, theme colors, and font choices are bounded. Links accept only fragments, same-site relative paths, or credential-free HTTPS URLs. Custom domains are forced to `null`/`disabled` because authoritative ownership, collision, TLS, route, and removal contracts do not exist. Admin-only APIs provide list/create/detail/edit/publish/revoke with optimistic revisions and atomic audits. Publishing freezes an immutable version; public APIs and `/site/:slug[/path]` render only the active frozen snapshot. The safe React renderer never accepts arbitrary markup or script. The production credential allowlist now correctly permits independently authenticated Survey and Sites public API/HTML routes while CRM routes remain Cloudflare Access protected; public Sites are indexable and all other public intake routes remain `noindex`.
+
+Sites local evidence on 2026-08-13: the complete `npm test` gate passed in 7m00s: production build, TypeScript, Twenty provenance, all 38 rendered/runtime checks, all 193 Worker tests across the six supported shards, and 25/25 Edge-ingestion tests. ESLint passed and `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Worker acceptance proves member mutation denial, draft invisibility, unsupported custom-domain rejection, a 200/409 publish race with exactly one immutable version, root and nested public routes, a frozen public snapshot after draft edits, database-enforced version immutability, and immediate revoke. Routing regression coverage proves public Survey/Sites APIs and HTML bypass only the platform credential gate, Survey HTML retains `noindex`, Site HTML is indexable, and `robots.txt` allows only `/site/`. Clean Linux CI, CodeQL, and GitGuardian remain the remote merge gates.
+
+Sites Edge acceptance on 2026-08-13: an admin created `Sites acceptance proof`, built a two-page site, added a bounded features block, saved the draft, and completed the two-step publish control. The public V1 rendered the saved hero, text, features, navigation, and inactive-custom-domain disclosure. Navigating to `/evidence` applied title `Evidence` and meta description `How OpenOperator proves safe publication.` Editing the draft hero to `PRIVATE DRAFT CHANGE` left the public V1 headline unchanged, proving browser-visible publication freezing. At 390px the public page reported `innerWidth=bodyClientWidth=bodyScrollWidth=documentScrollWidth=390`; the admin Sites route also reported 390px containment under per-tab device emulation. Admin and public tabs produced zero application errors. The two-step revoke control changed the admin state to `revoked` and the public route to `Page unavailable / Published site not found`.
 
 ## Next milestone sequence
 
-1. Surveys: separate versioned publish/respond lifecycle and response evidence; do not relabel Forms.
-2. Sites: independent page/version/publication/domain lifecycle after Surveys.
+1. Finish Sites full local gate, PR checks, merge, and exact memory evidence.
+2. Orient the next omitted product surface from the truth matrix; do not expose it until a complete independently proven vertical slice exists.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.
 

@@ -86,6 +86,10 @@ function usesIndependentCredential(pathname: string): boolean {
     /^\/v1\/integrations\/visitor-intent\/(audiencelab|rb2b)\/vti_[a-f0-9]{64}$/.test(pathname) ||
     /^\/v1\/public\/forms\/[a-z0-9][a-z0-9-]{2,79}(?:\/submissions)?$/.test(pathname) ||
     /^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
+    /^\/v1\/public\/surveys\/[a-z0-9][a-z0-9-]{2,79}(?:\/responses)?$/.test(pathname) ||
+    /^\/s\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
+    /^\/v1\/public\/sites\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
+    /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(pathname) ||
     /^\/v1\/public\/booking\/[a-z0-9][a-z0-9-]{2,79}(?:\/appointments)?$/.test(pathname) ||
     pathname === "/v1/public/appointments/manage" ||
     /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(pathname) ||
@@ -1995,6 +1999,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/conversations/send": ["POST"],
     "/v1/admin/forms": ["GET", "POST"],
     "/v1/admin/surveys": ["GET", "POST"],
+    "/v1/admin/sites": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
     "/v1/admin/reports/revenue-funnel": ["GET"],
     "/v1/admin/payments/ledger": ["GET", "POST"],
@@ -2005,6 +2010,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/surveys\/survey_[a-f0-9]{32}\/responses$/, ["GET"]],
+    [/^\/v1\/admin\/sites\/site_[a-f0-9]{32}$/, ["GET", "PATCH"]],
+    [/^\/v1\/admin\/sites\/site_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/custom-fields\/cfld_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/views$/, ["GET", "POST"]],
@@ -5227,7 +5234,7 @@ function siteText(value: unknown, field: string, max: number) {
 }
 function siteHref(value: unknown) {
   const href = siteText(value, "component link", 500);
-  if (!href || href.startsWith("/") && !href.startsWith("//")) return href;
+  if (!href || /^#[a-z][a-z0-9_-]{0,79}$/i.test(href) || href.startsWith("/") && !href.startsWith("//")) return href;
   let parsed: URL; try { parsed = new URL(href); } catch { throw new ApiError(400, "component link is invalid"); }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new ApiError(400, "component link must be a relative path or HTTPS URL");
   return href;
@@ -5635,6 +5642,21 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       return json({ error: "Response could not be recorded" }, 500);
     }
     return json({ ok: true, duplicate: false, response_id: responseId, success_message: published.success_message }, 201);
+  }
+
+  const publicSiteMatch = url.pathname.match(/^\/v1\/public\/sites\/([a-z0-9][a-z0-9-]{2,79})$/);
+  if (publicSiteMatch) {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
+    const requestedPath = url.searchParams.get("path") || "/";
+    if (!/^(?:\/|\/[a-z0-9][a-z0-9-]{0,58})$/.test(requestedPath)) return json({ error: "Page path is invalid" }, 400);
+    const row = await env.DB.prepare(`SELECT s.slug,v.version,v.pages,v.theme
+      FROM sites s JOIN site_versions v ON v.id=s.published_version_id AND v.workspace_id=s.workspace_id
+      WHERE s.slug=? AND s.status='published'`).bind(publicSiteMatch[1]).first<Record<string, unknown>>();
+    if (!row) return json({ error: "Published site not found" }, 404);
+    const pages = validateSitePages(JSON.parse(String(row.pages))); const page = pages.find((candidate) => candidate.path === requestedPath);
+    if (!page) return json({ error: "Published page not found" }, 404);
+    return json({ site: { slug: row.slug, version: row.version, navigation: pages.map(({ path, title }) => ({ path, title })), page, theme: validateSiteTheme(JSON.parse(String(row.theme))) },
+      hosting: { mode: "openoperator_path", custom_domain_active: false } });
   }
 
   const publicBookingMatch = url.pathname.match(/^\/v1\/public\/booking\/([a-z0-9][a-z0-9-]{2,79})$/);
@@ -6631,6 +6653,92 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     });
     const responses = evidence.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => key !== "questions")));
     return json({ responses, version_summaries: versionSummaries, truncated: rows.results.length > 100 });
+  }
+
+  if (url.pathname === "/v1/admin/sites" && request.method === "GET") {
+    const rows = await env.DB.prepare(`SELECT s.*,(SELECT COUNT(*) FROM site_versions v WHERE v.workspace_id=s.workspace_id AND v.site_id=s.id) version_count
+      FROM sites s WHERE s.workspace_id=? ORDER BY s.updated_at DESC,s.id`).bind(workspaceId).all<Record<string, unknown>>();
+    return json({ sites: rows.results.map((row) => ({ ...safeSite(row), version_count: row.version_count })) });
+  }
+  if (url.pathname === "/v1/admin/sites" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name"].includes(key))) return json({ error: "Site request contains unsupported fields" }, 400);
+    const name = optionalString(body.name, "name", 120) || ""; if (!name) return json({ error: "name is required" }, 400);
+    const siteId = id("site"); const now = new Date().toISOString(); const changeId = id("chg");
+    const slugBase = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "site";
+    const slug = `${slugBase}-${siteId.slice(-8)}`;
+    const pages: SitePage[] = [{ id: "home", path: "/", title: name, description: `${name} website`, components: [
+      { id: "hero_main", type: "hero", eyebrow: "WELCOME", heading: name, body: "A clear statement about what you do and who you help.", cta_label: "Learn more", cta_href: "#details" },
+      { id: "details", type: "text", heading: "Built for clarity", body: "Replace this text with the important details your visitors need." },
+    ] }];
+    const theme: SiteTheme = { background: "#f5f2e9", surface: "#ffffff", text: "#172d36", accent: "#087f8c", font: "system" };
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO sites(id,workspace_id,name,slug,status,pages,theme,custom_domain,domain_status,published_version_id,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,'draft',?,?,NULL,'disabled',NULL,1,?,?,?,?)`).bind(siteId, workspaceId, name, slug, JSON.stringify(pages), JSON.stringify(theme), changeId, access.email, now, now),
+      await auditStatement(env, access, request, "site.created", "site", siteId, null, { name, slug }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM sites WHERE workspace_id=? AND id=?").bind(workspaceId, siteId).first<Record<string, unknown>>();
+    return json({ site: safeSite(created!) }, 201);
+  }
+  const adminSiteMatch = url.pathname.match(/^\/v1\/admin\/sites\/(site_[a-f0-9]{32})$/);
+  if (adminSiteMatch && request.method === "GET") {
+    const site = await env.DB.prepare("SELECT * FROM sites WHERE workspace_id=? AND id=?").bind(workspaceId, adminSiteMatch[1]).first<Record<string, unknown>>();
+    if (!site) return json({ error: "Site not found" }, 404);
+    const versions = await env.DB.prepare("SELECT id,version,published_by,published_at FROM site_versions WHERE workspace_id=? AND site_id=? ORDER BY version DESC").bind(workspaceId, site.id).all();
+    return json({ site: safeSite(site), versions: versions.results, domain: { supported: false, status: "disabled" } });
+  }
+  if (adminSiteMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["name", "pages", "theme", "if_revision"].includes(key))) return json({ error: "Site update contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM sites WHERE workspace_id=? AND id=?").bind(workspaceId, adminSiteMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Site not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Site changed since it was loaded", code: "edit_conflict" }, 409);
+    const name = optionalString(body.name, "name", 120) || ""; if (!name) return json({ error: "name is required" }, 400);
+    const pages = validateSitePages(body.pages); const theme = validateSiteTheme(body.theme); const now = new Date().toISOString(); const changeId = id("chg");
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE sites SET name=?,pages=?,theme=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?")
+        .bind(name, JSON.stringify(pages), JSON.stringify(theme), changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,'site.updated','site',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM sites WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeSite(before)), JSON.stringify({ name, pages, theme }), requestId(request), now, workspaceId, before.id, changeId),
+    ]);
+    if (results.some((result) => !result.meta.changes)) return json({ error: "Site changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM sites WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ site: safeSite(updated!) });
+  }
+  const siteLifecycleMatch = url.pathname.match(/^\/v1\/admin\/sites\/(site_[a-f0-9]{32})\/(publish|revoke)$/);
+  if (siteLifecycleMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["if_revision", "confirmation"].includes(key))) return json({ error: "Lifecycle request contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM sites WHERE workspace_id=? AND id=?").bind(workspaceId, siteLifecycleMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Site not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Site changed since it was loaded", code: "edit_conflict" }, 409);
+    const action = siteLifecycleMatch[2]; if (body.confirmation !== (action === "publish" ? "PUBLISH SITE" : "REVOKE SITE")) return json({ error: "Explicit lifecycle confirmation is required" }, 400);
+    if (action === "revoke" && before.status !== "published") return json({ error: "Only a published site can be revoked" }, 409);
+    validateSitePages(JSON.parse(String(before.pages))); validateSiteTheme(JSON.parse(String(before.theme)));
+    const now = new Date().toISOString(); const changeId = id("chg");
+    if (action === "publish") {
+      const next = await env.DB.prepare("SELECT COALESCE(MAX(version),0)+1 version FROM site_versions WHERE workspace_id=? AND site_id=?").bind(workspaceId, before.id).first<{ version: number }>();
+      const versionId = id("siver");
+      try { const results = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO site_versions(id,workspace_id,site_id,version,pages,theme,published_by,published_at)
+          SELECT ?,workspace_id,id,?,?,?,?,? FROM sites WHERE workspace_id=? AND id=? AND revision=?`).bind(versionId, Number(next?.version || 1), before.pages, before.theme, access.email, now, workspaceId, before.id, before.revision),
+        env.DB.prepare("UPDATE sites SET status='published',published_version_id=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?").bind(versionId, changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'site.published','site',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM sites WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeSite(before)), JSON.stringify({ version_id: versionId, version: next?.version }), requestId(request), now, workspaceId, before.id, changeId),
+      ]); if (results.some((result) => !result.meta.changes)) throw new Error("conflict"); }
+      catch { return json({ error: "Site changed before it could be published", code: "edit_conflict" }, 409); }
+    } else {
+      const results = await env.DB.batch([
+        env.DB.prepare("UPDATE sites SET status='revoked',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?").bind(changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'site.revoked','site',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM sites WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeSite(before)), JSON.stringify({ status: "revoked" }), requestId(request), now, workspaceId, before.id, changeId),
+      ]); if (results.some((result) => !result.meta.changes)) return json({ error: "Site changed before it could be revoked", code: "edit_conflict" }, 409);
+    }
+    const updated = await env.DB.prepare("SELECT * FROM sites WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ site: safeSite(updated!) });
   }
 
   const communicationConsentMatch = url.pathname.match(/^\/v1\/admin\/contacts\/([^/]+)\/communication-consent$/);
@@ -13834,7 +13942,7 @@ const worker = {
     const url = new URL(request.url);
     try {
       if ((url.pathname === "/robots.txt" || url.pathname === "/sitemap.xml") && request.method === "GET") {
-        return new Response("User-agent: *\nDisallow: /\n", {
+        return new Response("User-agent: *\nDisallow: /\nAllow: /site/\n", {
           status: url.pathname === "/robots.txt" ? 200 : 404,
           headers: {
             "content-type": "text/plain; charset=utf-8",
@@ -13848,11 +13956,13 @@ const worker = {
       if (usesIndependentCredential(url.pathname)) {
         const independentlyAuthenticated = await api(request, env, url);
         if (independentlyAuthenticated) return independentlyAuthenticated;
-        if ((/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) ||
-          /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(url.pathname)) && request.method === "GET") {
+        if ((/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) || /^\/s\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) ||
+          /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(url.pathname) ||
+          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname)) && request.method === "GET") {
           const response = await handler.fetch(request, env, ctx);
           const headers = new Headers(response.headers);
           for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
+          if (url.pathname.startsWith("/site/")) headers.delete("x-robots-tag");
           headers.set("cache-control", "public, max-age=60, stale-while-revalidate=300");
           return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
         }
