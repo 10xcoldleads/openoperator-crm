@@ -39,6 +39,8 @@ npx wrangler d1 migrations list openoperator-crm --remote
 npx wrangler d1 migrations apply openoperator-crm --remote
 ```
 
+Wrangler may return `incomplete input` while batching trigger-heavy migrations `0017` or `0038` against remote D1 even though the SQL is valid locally. If that occurs, execute that single file with `wrangler d1 execute DB --remote --file drizzle/<migration>.sql`, verify the resulting tables/triggers, record its filename in `d1_migrations`, and resume `migrations apply`. Never mark a migration applied before verifying that the direct file execution succeeded.
+
 ## 4. Configure secrets
 
 At minimum, generate unique values for the webhook encryption key, recovery encryption key, scheduler authentication, and the private intake-to-CRM hop. Store them with `wrangler secret put`; do not place them in JSON, source, CI logs, or GitHub variables exposed to forks.
@@ -59,6 +61,8 @@ npx wrangler deploy --config ingest-worker/wrangler.jsonc --dry-run
 ```
 
 Deploy the private CRM, verify identity enforcement, then deploy the intake Worker. Test health, unauthorized rejection, one disposable source credential, idempotent ingestion, and credential revocation before accepting real traffic.
+
+In Workers > Domains, set both the production Worker URL and preview URLs to **Restricted**. Cloudflare creates an Access application and exposes the audience tag and JWKS URL. Put those values into `POLICY_AUD` and `TEAM_DOMAIN`, redeploy, and confirm an anonymous browser receives the Access login screen rather than CRM HTML.
 
 ## 6. Optional providers
 
