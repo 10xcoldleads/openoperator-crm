@@ -86,6 +86,9 @@ function usesIndependentCredential(pathname: string): boolean {
     /^\/v1\/integrations\/visitor-intent\/(audiencelab|rb2b)\/vti_[a-f0-9]{64}$/.test(pathname) ||
     /^\/v1\/public\/forms\/[a-z0-9][a-z0-9-]{2,79}(?:\/submissions)?$/.test(pathname) ||
     /^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(pathname) ||
+    /^\/v1\/public\/booking\/[a-z0-9][a-z0-9-]{2,79}(?:\/appointments)?$/.test(pathname) ||
+    pathname === "/v1/public/appointments/manage" ||
+    /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(pathname) ||
     /^\/v1\/hooks\/[^/]+$/.test(pathname);
 }
 type Json = Record<string, unknown>;
@@ -222,7 +225,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 26;
+const RECOVERY_SCHEMA_VERSION = 27;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -232,7 +235,8 @@ type RecoveryTable =
   | "visitor_connectors" | "audience_imports" | "visitor_profiles" | "audience_import_members"
   | "visitor_events" | "visitor_intent_cases" | "mailbox_connections"
   | "communication_consents" | "conversation_threads" | "conversation_messages"
-  | "forms" | "form_versions" | "form_submissions";
+  | "forms" | "form_versions" | "form_submissions"
+  | "booking_calendars" | "booking_availability_rules" | "booking_appointments";
 type RecoverySpec = { columns: string[] };
 const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   pipelines: { columns: ["id", "workspace_id", "name", "object_type", "active", "created_at", "updated_at"] },
@@ -268,6 +272,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   forms: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "fields", "consent_text", "success_message", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   form_versions: { columns: ["id", "workspace_id", "form_id", "version", "title", "description", "fields", "consent_text", "success_message", "published_by", "published_at"] },
   form_submissions: { columns: ["id", "workspace_id", "form_id", "form_version_id", "idempotency_key", "contact_id", "payload", "email_consent", "consent_text", "ip_hash", "user_agent", "submitted_at"] },
+  booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
+  booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
 };
 const recoveryTables = Object.keys(recoverySpecs) as RecoveryTable[];
 const securityHeaders = {
@@ -1978,6 +1985,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/conversations": ["GET"],
     "/v1/admin/conversations/send": ["POST"],
     "/v1/admin/forms": ["GET", "POST"],
+    "/v1/admin/booking-calendars": ["GET", "POST"],
   };
   if (exact[pathname]) return exact[pathname];
   const patterns: Array<[RegExp, string[]]> = [
@@ -2005,6 +2013,9 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}\/submissions$/, ["GET"]],
+    [/^\/v1\/admin\/booking-calendars\/bcal_[a-f0-9]{32}$/, ["GET", "PATCH"]],
+    [/^\/v1\/admin\/booking-calendars\/bcal_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
+    [/^\/v1\/admin\/booking-calendars\/bcal_[a-f0-9]{32}\/appointments$/, ["GET"]],
     [/^\/v1\/admin\/opportunities\/[^/]+\/intelligence$/, ["GET"]],
     [/^\/v1\/admin\/opportunities\/[^/]+$/, ["PATCH", "DELETE"]],
     [/^\/v1\/admin\/tasks\/[^/]+$/, ["PATCH", "DELETE"]],
@@ -2414,6 +2425,39 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     requireReference("form_submissions", row, "form_id", "forms");
     requireReference("form_submissions", row, "form_version_id", "form_versions");
     requireReference("form_submissions", row, "contact_id", "contacts");
+  }
+  for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
+  for (const row of tables.booking_appointments) {
+    requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
+    requireReference("booking_appointments", row, "contact_id", "contacts");
+  }
+  const bookingSlugs = new Set<string>();
+  const bookingIdempotency = new Set<string>();
+  const bookingTokens = new Set<string>();
+  for (const row of tables.booking_calendars) {
+    if (bookingSlugs.has(String(row.slug)) || !/^[a-z0-9][a-z0-9-]{2,79}$/.test(String(row.slug)) ||
+      !["draft", "published", "revoked"].includes(String(row.status)) || !validTimeZone(String(row.timezone)) ||
+      !Number.isInteger(row.duration_minutes) || Number(row.duration_minutes) < 15 || Number(row.duration_minutes) > 180 ||
+      !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid booking calendar");
+    }
+    bookingSlugs.add(String(row.slug));
+  }
+  for (const calendar of tables.booking_calendars) {
+    validateBookingRules(tables.booking_availability_rules.filter((rule) => rule.calendar_id === calendar.id)
+      .map((rule) => ({ day_of_week: rule.day_of_week, start_minute: rule.start_minute, end_minute: rule.end_minute })));
+  }
+  for (const row of tables.booking_appointments) {
+    const replay = `${row.calendar_id}:${row.idempotency_key}`;
+    if (bookingIdempotency.has(replay) || bookingTokens.has(String(row.manage_token_hash)) ||
+      !/^[A-Za-z0-9._:-]{8,100}$/.test(String(row.idempotency_key)) || !/^[a-f0-9]{64}$/.test(String(row.manage_token_hash)) ||
+      !["booked", "cancelled"].includes(String(row.status)) || !["local", "pending", "synced", "failed"].includes(String(row.sync_status)) ||
+      !validEmail(normalizeEmail(row.email)) || !validTimeZone(String(row.visitor_timezone)) ||
+      Date.parse(String(row.starts_at)) >= Date.parse(String(row.ends_at))) {
+      throw new ApiError(400, "Backup contains an invalid booking appointment");
+    }
+    bookingIdempotency.add(replay);
+    bookingTokens.add(String(row.manage_token_hash));
   }
   const formSlugs = new Set<string>();
   for (const row of tables.forms) {
@@ -5116,6 +5160,93 @@ function safeFormSubmission(row: Record<string, unknown>) {
     payload: JSON.parse(String(row.payload)), email_consent: Boolean(row.email_consent), submitted_at: row.submitted_at };
 }
 
+type BookingRule = { day_of_week: number; start_minute: number; end_minute: number };
+function validTimeZone(value: string) {
+  try { new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date()); return value.length <= 100; } catch { return false; }
+}
+function validateBookingRules(value: unknown): BookingRule[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 21) throw new ApiError(400, "availability must contain 1 to 21 windows");
+  const seen = new Set<string>();
+  const rules = value.map((raw) => {
+    if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["day_of_week", "start_minute", "end_minute"].includes(key))) throw new ApiError(400, "An availability window is malformed");
+    const day = Number(raw.day_of_week); const start = Number(raw.start_minute); const end = Number(raw.end_minute);
+    const identity = `${day}:${start}:${end}`;
+    if (!Number.isInteger(day) || day < 0 || day > 6 || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > 1440 || start >= end || seen.has(identity)) {
+      throw new ApiError(400, "An availability window is invalid or duplicated");
+    }
+    seen.add(identity); return { day_of_week: day, start_minute: start, end_minute: end };
+  });
+  for (const day of Array.from({ length: 7 }, (_, index) => index)) {
+    const windows = rules.filter((rule) => rule.day_of_week === day).sort((a, b) => a.start_minute - b.start_minute);
+    if (windows.some((window, index) => index > 0 && window.start_minute < windows[index - 1].end_minute)) throw new ApiError(400, "Availability windows cannot overlap");
+  }
+  return rules;
+}
+function zoneOffsetMs(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+    .formatToParts(date).reduce<Record<string, number>>((result, part) => { if (part.type !== "literal") result[part.type] = Number(part.value); return result; }, {});
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - date.getTime();
+}
+function zonedWallTimeToUtc(year: number, month: number, day: number, minuteOfDay: number, timeZone: string) {
+  const guess = Date.UTC(year, month - 1, day, Math.floor(minuteOfDay / 60), minuteOfDay % 60);
+  let result = guess - zoneOffsetMs(new Date(guess), timeZone);
+  result = guess - zoneOffsetMs(new Date(result), timeZone);
+  return new Date(result);
+}
+function parseLocalDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value); if (!match) return null;
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  return { year, month, day, date };
+}
+function localDateInZone(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date)
+    .reduce<Record<string, string>>((result, part) => { if (part.type !== "literal") result[part.type] = part.value; return result; }, {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+function safeBookingCalendar(row: Record<string, unknown>, rules: BookingRule[] = []) {
+  return { id: row.id, name: row.name, slug: row.slug, status: row.status, title: row.title, description: row.description,
+    timezone: row.timezone, duration_minutes: row.duration_minutes, buffer_before_minutes: row.buffer_before_minutes,
+    buffer_after_minutes: row.buffer_after_minutes, minimum_notice_minutes: row.minimum_notice_minutes,
+    maximum_days_ahead: row.maximum_days_ahead, revision: row.revision, availability: rules,
+    public_path: row.status === "published" ? `/book/${row.slug}` : null, created_at: row.created_at, updated_at: row.updated_at };
+}
+function safeAppointment(row: Record<string, unknown>) {
+  return { id: row.id, calendar_id: row.calendar_id, contact_id: row.contact_id, name: row.name, email: row.email, phone: row.phone,
+    visitor_timezone: row.visitor_timezone, starts_at: row.starts_at, ends_at: row.ends_at, status: row.status,
+    sync_status: row.sync_status, external_provider: row.external_provider, cancelled_at: row.cancelled_at,
+    cancellation_reason: row.cancellation_reason, revision: row.revision, created_at: row.created_at, updated_at: row.updated_at };
+}
+async function bookingAvailability(env: FrameworkEnv, calendar: Record<string, unknown>, dateFrom: string, days: number, excludeAppointmentId?: string) {
+  const localStart = parseLocalDate(dateFrom); if (!localStart) throw new ApiError(400, "date_from must use YYYY-MM-DD");
+  if (!Number.isInteger(days) || days < 1 || days > 14) throw new ApiError(400, "days must be an integer from 1 to 14");
+  const rules = await env.DB.prepare(`SELECT day_of_week,start_minute,end_minute FROM booking_availability_rules WHERE workspace_id=? AND calendar_id=? ORDER BY day_of_week,start_minute`)
+    .bind(calendar.workspace_id, calendar.id).all<BookingRule>();
+  const fromUtc = zonedWallTimeToUtc(localStart.year, localStart.month, localStart.day, 0, String(calendar.timezone));
+  const rangeEnd = new Date(fromUtc.getTime() + (days + 2) * 86_400_000);
+  const appointments = await env.DB.prepare(`SELECT starts_at,ends_at FROM booking_appointments WHERE workspace_id=? AND calendar_id=? AND status='booked' AND starts_at<? AND ends_at>? AND (? IS NULL OR id<>?)`)
+    .bind(calendar.workspace_id, calendar.id, rangeEnd.toISOString(), fromUtc.toISOString(), excludeAppointmentId || null, excludeAppointmentId || null)
+    .all<{ starts_at: string; ends_at: string }>();
+  const now = Date.now(); const earliest = now + Number(calendar.minimum_notice_minutes) * 60_000;
+  const latest = now + Number(calendar.maximum_days_ahead) * 86_400_000;
+  const duration = Number(calendar.duration_minutes); const before = Number(calendar.buffer_before_minutes) * 60_000; const after = Number(calendar.buffer_after_minutes) * 60_000;
+  const slots: Array<{ starts_at: string; ends_at: string }> = [];
+  for (let offset = 0; offset < days; offset++) {
+    const localDate = new Date(localStart.date.getTime() + offset * 86_400_000);
+    const year = localDate.getUTCFullYear(); const month = localDate.getUTCMonth() + 1; const day = localDate.getUTCDate(); const weekday = localDate.getUTCDay();
+    for (const rule of rules.results.filter((candidate) => candidate.day_of_week === weekday)) {
+      for (let minute = rule.start_minute; minute + duration <= rule.end_minute; minute += duration) {
+        const start = zonedWallTimeToUtc(year, month, day, minute, String(calendar.timezone)); const end = new Date(start.getTime() + duration * 60_000);
+        if (start.getTime() < earliest || start.getTime() > latest) continue;
+        const conflict = appointments.results.some((appointment) => Date.parse(appointment.starts_at) < end.getTime() + after && Date.parse(appointment.ends_at) > start.getTime() - before);
+        if (!conflict) slots.push({ starts_at: start.toISOString(), ends_at: end.toISOString() });
+      }
+    }
+  }
+  return slots;
+}
+
 async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Response | null> {
   const mcpResponse = await handleAgentMcp(request, env, url);
   if (mcpResponse) return mcpResponse;
@@ -5228,6 +5359,137 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       return json({ error: "Submission could not be recorded" }, 500);
     }
     return json({ ok: true, duplicate: false, submission_id: submissionId, success_message: published.success_message }, 201);
+  }
+
+  const publicBookingMatch = url.pathname.match(/^\/v1\/public\/booking\/([a-z0-9][a-z0-9-]{2,79})$/);
+  if (publicBookingMatch) {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
+    const calendar = await env.DB.prepare("SELECT * FROM booking_calendars WHERE slug=? AND status='published'")
+      .bind(publicBookingMatch[1]).first<Record<string, unknown>>();
+    if (!calendar) return json({ error: "Published booking calendar not found" }, 404);
+    const dateFrom = url.searchParams.get("date_from") || localDateInZone(new Date(), String(calendar.timezone));
+    const days = Number(url.searchParams.get("days") || 7);
+    try {
+      const slots = await bookingAvailability(env, calendar, dateFrom, days);
+      return json({ calendar: { slug: calendar.slug, title: calendar.title, description: calendar.description,
+        timezone: calendar.timezone, duration_minutes: calendar.duration_minutes }, slots,
+        range: { date_from: dateFrom, days }, provider: { mode: "local", external_sync: false } });
+    } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Availability could not be calculated" }, 500); }
+  }
+  const publicBookingCreateMatch = url.pathname.match(/^\/v1\/public\/booking\/([a-z0-9][a-z0-9-]{2,79})\/appointments$/);
+  if (publicBookingCreateMatch) {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["name", "email", "phone", "visitor_timezone", "starts_at", "privacy_accepted", "idempotency_key", "website"].includes(key))) {
+      return json({ error: "Booking request contains unsupported fields" }, 400);
+    }
+    if (typeof body.website === "string" && body.website.trim()) return json({ ok: true, accepted: true }, 202);
+    if (body.privacy_accepted !== true) return json({ error: "Privacy acknowledgement is required" }, 400);
+    const name = optionalString(body.name, "name", 160) || ""; const email = normalizeEmail(body.email); const phone = optionalString(body.phone, "phone", 50);
+    const visitorTimezone = optionalString(body.visitor_timezone, "visitor_timezone", 100) || ""; const startsAt = optionalString(body.starts_at, "starts_at", 50) || "";
+    const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!name || !validEmail(email) || !validTimeZone(visitorTimezone) || !Number.isFinite(Date.parse(startsAt)) || !/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) {
+      return json({ error: "name, valid email, visitor timezone, start time, and idempotency key are required" }, 400);
+    }
+    const calendar = await env.DB.prepare("SELECT * FROM booking_calendars WHERE slug=? AND status='published'")
+      .bind(publicBookingCreateMatch[1]).first<Record<string, unknown>>();
+    if (!calendar) return json({ error: "Published booking calendar not found" }, 404);
+    const canonicalStart = new Date(startsAt).toISOString();
+    const existing = await env.DB.prepare("SELECT * FROM booking_appointments WHERE workspace_id=? AND calendar_id=? AND idempotency_key=?")
+      .bind(calendar.workspace_id, calendar.id, idempotencyKey).first<Record<string, unknown>>();
+    if (existing) {
+      if (existing.email !== email || existing.starts_at !== canonicalStart || existing.name !== name) return json({ error: "Idempotency key was already used for a different booking" }, 409);
+      return json({ ok: true, duplicate: true, appointment: safeAppointment(existing), manage_token: null });
+    }
+    const localDate = localDateInZone(new Date(canonicalStart), String(calendar.timezone));
+    const offered = await bookingAvailability(env, calendar, localDate, 1);
+    const slot = offered.find((candidate) => candidate.starts_at === canonicalStart);
+    if (!slot) return json({ error: "That time is no longer available", code: "booking_conflict" }, 409);
+    const contact = await env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND email=?").bind(calendar.workspace_id, email).first<{ id: string }>();
+    const contactId = contact?.id || `con_${(await sha256(`${calendar.workspace_id}:${email}`)).slice(0, 32)}`;
+    const appointmentId = id("appt"); const manageToken = `bman_${crmMailboxStateToken(32)}`; const manageHash = await sha256(manageToken);
+    const now = new Date().toISOString(); const changeId = id("chg"); const beforeMs = Number(calendar.buffer_before_minutes) * 60_000; const afterMs = Number(calendar.buffer_after_minutes) * 60_000;
+    const guardStart = new Date(Date.parse(slot.starts_at) - beforeMs).toISOString(); const guardEnd = new Date(Date.parse(slot.ends_at) + afterMs).toISOString();
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM booking_calendars WHERE id=? AND workspace_id=? AND status='published')
+          AND NOT EXISTS(SELECT 1 FROM booking_appointments WHERE workspace_id=? AND calendar_id=? AND status='booked' AND starts_at<? AND ends_at>?)
+          THEN 1 ELSE json('booking_conflict') END`).bind(calendar.id, calendar.workspace_id, calendar.workspace_id, calendar.id, guardEnd, guardStart),
+        env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,first_name,phone,status,stage,score,tags,custom_fields,source_first,source_last,last_activity_at,created_at,updated_at)
+          VALUES(?,?,?,?,?,'lead','booked',0,'["booking"]','{}',?,?,?, ?,?)
+          ON CONFLICT(workspace_id,email) DO UPDATE SET first_name=COALESCE(NULLIF(contacts.first_name,''),excluded.first_name),phone=COALESCE(NULLIF(contacts.phone,''),excluded.phone),
+            stage='booked',source_last=excluded.source_last,last_activity_at=excluded.last_activity_at,updated_at=excluded.updated_at`)
+          .bind(contactId, calendar.workspace_id, email, name, phone, `booking:${calendar.slug}`, `booking:${calendar.slug}`, now, now, now),
+        env.DB.prepare(`INSERT INTO booking_appointments(id,workspace_id,calendar_id,contact_id,idempotency_key,name,email,phone,visitor_timezone,starts_at,ends_at,status,manage_token_hash,
+          external_provider,external_event_id,sync_status,cancelled_at,cancellation_reason,revision,change_id,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,'booked',?,NULL,NULL,'local',NULL,NULL,1,?,?,?)`)
+          .bind(appointmentId, calendar.workspace_id, calendar.id, contactId, idempotencyKey, name, email, phone, visitorTimezone, slot.starts_at, slot.ends_at, manageHash, changeId, now, now),
+        env.DB.prepare(`INSERT INTO activities(id,workspace_id,contact_id,source_id,type,title,body,metadata,external_id,occurred_at,created_at)
+          VALUES(?,?,?,NULL,'calendar.meeting_scheduled','Meeting booked',?,?,?, ?,?)`).bind(id("act"), calendar.workspace_id, contactId,
+          `${calendar.title} · ${slot.starts_at}`, JSON.stringify({ calendar_id: calendar.id, appointment_id: appointmentId, ends_at: slot.ends_at }), appointmentId, now, now),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
+          VALUES(?,?,'public',?,'booking.created','booking_appointment',?,NULL,?,?,?,?)`).bind(id("audit"), calendar.workspace_id, email, appointmentId,
+          JSON.stringify({ calendar_id: calendar.id, starts_at: slot.starts_at, ends_at: slot.ends_at }), requestId(request),
+          request.headers.get("cf-connecting-ip") ? await sha256(`${calendar.workspace_id}:${request.headers.get("cf-connecting-ip")}`) : null, now),
+      ]);
+    } catch {
+      const raced = await env.DB.prepare("SELECT * FROM booking_appointments WHERE workspace_id=? AND calendar_id=? AND idempotency_key=?")
+        .bind(calendar.workspace_id, calendar.id, idempotencyKey).first<Record<string, unknown>>();
+      if (raced) return raced.email === email && raced.starts_at === canonicalStart ? json({ ok: true, duplicate: true, appointment: safeAppointment(raced), manage_token: null })
+        : json({ error: "Idempotency key was already used for a different booking" }, 409);
+      return json({ error: "That time is no longer available", code: "booking_conflict" }, 409);
+    }
+    const appointment = await env.DB.prepare("SELECT * FROM booking_appointments WHERE id=?").bind(appointmentId).first<Record<string, unknown>>();
+    return json({ ok: true, duplicate: false, appointment: safeAppointment(appointment!), manage_token: manageToken }, 201);
+  }
+  if (url.pathname === "/v1/public/appointments/manage") {
+    if (!["GET", "POST"].includes(request.method)) return json({ error: "Method not allowed" }, 405, { allow: "GET, POST" });
+    const token = bearer(request); if (!/^bman_[a-f0-9]{64}$/.test(token)) return json({ error: "Valid management token required" }, 401);
+    const appointment = await env.DB.prepare("SELECT a.*,c.slug calendar_slug,c.title calendar_title,c.timezone calendar_timezone,c.duration_minutes,c.buffer_before_minutes,c.buffer_after_minutes,c.minimum_notice_minutes,c.maximum_days_ahead,c.status calendar_status,c.workspace_id calendar_workspace_id FROM booking_appointments a JOIN booking_calendars c ON c.id=a.calendar_id AND c.workspace_id=a.workspace_id WHERE a.manage_token_hash=?")
+      .bind(await sha256(token)).first<Record<string, unknown>>();
+    if (!appointment) return json({ error: "Booking not found" }, 404);
+    if (request.method === "GET") return json({ appointment: safeAppointment(appointment), calendar: { slug: appointment.calendar_slug, title: appointment.calendar_title, timezone: appointment.calendar_timezone } });
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["action", "starts_at", "reason", "if_revision"].includes(key))) return json({ error: "Management request contains unsupported fields" }, 400);
+    if (Number(body.if_revision) !== Number(appointment.revision)) return json({ error: "Booking changed since it was loaded", code: "edit_conflict" }, 409);
+    const action = optionalString(body.action, "action", 20) || ""; const now = new Date().toISOString(); const changeId = id("chg");
+    if (action === "cancel") {
+      if (appointment.status !== "booked") return json({ error: "Booking is already cancelled" }, 409);
+      const reason = optionalString(body.reason, "reason", 300);
+      const changed = await env.DB.batch([
+        env.DB.prepare(`UPDATE booking_appointments SET status='cancelled',cancelled_at=?,cancellation_reason=?,revision=revision+1,change_id=?,updated_at=?
+          WHERE id=? AND revision=? AND status='booked'`).bind(now, reason, changeId, now, appointment.id, appointment.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'public',?,'booking.cancelled','booking_appointment',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM booking_appointments WHERE id=? AND change_id=?)`)
+          .bind(id("audit"), appointment.workspace_id, appointment.email, appointment.id, JSON.stringify(safeAppointment(appointment)), JSON.stringify({ status: "cancelled", reason }), requestId(request), now, appointment.id, changeId),
+      ]);
+      if (!changed[0].meta.changes || !changed[1].meta.changes) return json({ error: "Booking changed before it could be cancelled", code: "edit_conflict" }, 409);
+    } else if (action === "reschedule") {
+      if (appointment.status !== "booked" || appointment.calendar_status !== "published") return json({ error: "Only an active booking on a published calendar can be rescheduled" }, 409);
+      const startsAt = optionalString(body.starts_at, "starts_at", 50) || ""; if (!Number.isFinite(Date.parse(startsAt))) return json({ error: "A valid starts_at is required" }, 400);
+      const canonical = new Date(startsAt).toISOString(); const calendar = { ...appointment, id: appointment.calendar_id, workspace_id: appointment.workspace_id,
+        timezone: appointment.calendar_timezone, status: appointment.calendar_status };
+      const offered = await bookingAvailability(env, calendar, localDateInZone(new Date(canonical), String(appointment.calendar_timezone)), 1, String(appointment.id));
+      const slot = offered.find((candidate) => candidate.starts_at === canonical); if (!slot) return json({ error: "That time is no longer available", code: "booking_conflict" }, 409);
+      const guardStart = new Date(Date.parse(slot.starts_at) - Number(appointment.buffer_before_minutes) * 60_000).toISOString();
+      const guardEnd = new Date(Date.parse(slot.ends_at) + Number(appointment.buffer_after_minutes) * 60_000).toISOString();
+      try {
+        const results = await env.DB.batch([
+          env.DB.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM booking_calendars WHERE id=? AND workspace_id=? AND status='published')
+            AND EXISTS(SELECT 1 FROM booking_appointments WHERE id=? AND revision=? AND status='booked')
+            AND NOT EXISTS(SELECT 1 FROM booking_appointments WHERE workspace_id=? AND calendar_id=? AND id<>? AND status='booked' AND starts_at<? AND ends_at>?)
+            THEN 1 ELSE json('booking_conflict') END`).bind(appointment.calendar_id, appointment.workspace_id, appointment.id, appointment.revision,
+              appointment.workspace_id, appointment.calendar_id, appointment.id, guardEnd, guardStart),
+          env.DB.prepare(`UPDATE booking_appointments SET starts_at=?,ends_at=?,revision=revision+1,change_id=?,updated_at=? WHERE id=? AND revision=? AND status='booked'`)
+            .bind(slot.starts_at, slot.ends_at, changeId, now, appointment.id, appointment.revision),
+          env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+            SELECT ?,?,'public',?,'booking.rescheduled','booking_appointment',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM booking_appointments WHERE id=? AND change_id=?)`)
+            .bind(id("audit"), appointment.workspace_id, appointment.email, appointment.id, JSON.stringify(safeAppointment(appointment)), JSON.stringify({ starts_at: slot.starts_at, ends_at: slot.ends_at }), requestId(request), now, appointment.id, changeId),
+        ]);
+        if (!results[1].meta.changes || !results[2].meta.changes) return json({ error: "Booking changed before it could be rescheduled", code: "edit_conflict" }, 409);
+      } catch { return json({ error: "That time is no longer available", code: "booking_conflict" }, 409); }
+    } else return json({ error: "action must be cancel or reschedule" }, 400);
+    const updated = await env.DB.prepare("SELECT * FROM booking_appointments WHERE id=?").bind(appointment.id).first<Record<string, unknown>>();
+    return json({ appointment: safeAppointment(updated!) });
   }
 
   if (url.pathname === "/v1/contacts/upsert") {
@@ -5540,6 +5802,116 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       pipeline: pipelineCatalog,
       currentUser: { role: access.role },
     });
+  }
+
+  if (url.pathname === "/v1/admin/booking-calendars" && request.method === "GET") {
+    const rows = await env.DB.prepare(`SELECT c.*,
+      (SELECT COUNT(*) FROM booking_appointments a WHERE a.workspace_id=c.workspace_id AND a.calendar_id=c.id AND a.status='booked') appointment_count,
+      (SELECT MIN(starts_at) FROM booking_appointments a WHERE a.workspace_id=c.workspace_id AND a.calendar_id=c.id AND a.status='booked' AND starts_at>?) next_appointment_at
+      FROM booking_calendars c WHERE c.workspace_id=? ORDER BY c.updated_at DESC,c.id`).bind(new Date().toISOString(), workspaceId).all<Record<string, unknown>>();
+    const rules = await env.DB.prepare(`SELECT calendar_id,day_of_week,start_minute,end_minute FROM booking_availability_rules
+      WHERE workspace_id=? ORDER BY calendar_id,day_of_week,start_minute`).bind(workspaceId).all<BookingRule & { calendar_id: string }>();
+    return json({ calendars: rows.results.map((row) => ({ ...safeBookingCalendar(row, rules.results.filter((rule) => rule.calendar_id === row.id)),
+      appointment_count: row.appointment_count, next_appointment_at: row.next_appointment_at })) });
+  }
+  if (url.pathname === "/v1/admin/booking-calendars" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["name", "title", "timezone"].includes(key))) return json({ error: "Calendar request contains unsupported fields" }, 400);
+    const name = optionalString(body.name, "name", 120) || ""; const title = optionalString(body.title, "title", 160) || "";
+    const timezone = optionalString(body.timezone, "timezone", 100) || "UTC";
+    if (!name || !title || !validTimeZone(timezone)) return json({ error: "name, title, and a valid timezone are required" }, 400);
+    const calendarId = id("bcal"); const now = new Date().toISOString(); const changeId = id("chg");
+    const slugBase = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "calendar";
+    const slug = `${slugBase}-${calendarId.slice(-8)}`;
+    const defaults: BookingRule[] = [1, 2, 3, 4, 5].map((day_of_week) => ({ day_of_week, start_minute: 540, end_minute: 1020 }));
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO booking_calendars(id,workspace_id,name,slug,status,title,description,timezone,duration_minutes,buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,maximum_days_ahead,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,'draft',?,'',?,30,0,0,60,60,1,?,?,?,?)`).bind(calendarId, workspaceId, name, slug, title, timezone, changeId, access.email, now, now),
+      ...defaults.map((rule) => env.DB.prepare(`INSERT INTO booking_availability_rules(id,workspace_id,calendar_id,day_of_week,start_minute,end_minute,created_at) VALUES(?,?,?,?,?,?,?)`)
+        .bind(id("brule"), workspaceId, calendarId, rule.day_of_week, rule.start_minute, rule.end_minute, now)),
+      await auditStatement(env, access, request, "booking_calendar.created", "booking_calendar", calendarId, null, { name, slug, title, timezone }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, calendarId).first<Record<string, unknown>>();
+    return json({ calendar: safeBookingCalendar(created!, defaults) }, 201);
+  }
+  const adminBookingMatch = url.pathname.match(/^\/v1\/admin\/booking-calendars\/(bcal_[a-f0-9]{32})$/);
+  if (adminBookingMatch && request.method === "GET") {
+    const calendar = await env.DB.prepare("SELECT * FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, adminBookingMatch[1]).first<Record<string, unknown>>();
+    if (!calendar) return json({ error: "Booking calendar not found" }, 404);
+    const rules = await env.DB.prepare(`SELECT day_of_week,start_minute,end_minute FROM booking_availability_rules WHERE workspace_id=? AND calendar_id=? ORDER BY day_of_week,start_minute`)
+      .bind(workspaceId, calendar.id).all<BookingRule>();
+    return json({ calendar: safeBookingCalendar(calendar, rules.results) });
+  }
+  if (adminBookingMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    const allowed = ["name", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "availability", "if_revision"];
+    if (Object.keys(body).some((key) => !allowed.includes(key))) return json({ error: "Calendar update contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, adminBookingMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Booking calendar not found" }, 404);
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Calendar changed since it was loaded", code: "edit_conflict" }, 409);
+    const name = optionalString(body.name, "name", 120) || ""; const title = optionalString(body.title, "title", 160) || "";
+    const description = optionalString(body.description, "description", 1000) || ""; const timezone = optionalString(body.timezone, "timezone", 100) || "";
+    const duration = Number(body.duration_minutes); const bufferBefore = Number(body.buffer_before_minutes); const bufferAfter = Number(body.buffer_after_minutes);
+    const notice = Number(body.minimum_notice_minutes); const maximum = Number(body.maximum_days_ahead); const rules = validateBookingRules(body.availability);
+    if (!name || !title || !validTimeZone(timezone) || !Number.isInteger(duration) || duration < 15 || duration > 180 ||
+      !Number.isInteger(bufferBefore) || bufferBefore < 0 || bufferBefore > 120 || !Number.isInteger(bufferAfter) || bufferAfter < 0 || bufferAfter > 120 ||
+      !Number.isInteger(notice) || notice < 0 || notice > 43200 || !Number.isInteger(maximum) || maximum < 1 || maximum > 365) {
+      return json({ error: "Calendar settings are invalid" }, 400);
+    }
+    const now = new Date().toISOString(); const changeId = id("chg");
+    try {
+      const results = await env.DB.batch([
+        env.DB.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM booking_calendars WHERE workspace_id=? AND id=? AND revision=?) THEN 1 ELSE json('edit_conflict') END`)
+          .bind(workspaceId, before.id, before.revision),
+        env.DB.prepare(`UPDATE booking_calendars SET name=?,title=?,description=?,timezone=?,duration_minutes=?,buffer_before_minutes=?,buffer_after_minutes=?,minimum_notice_minutes=?,maximum_days_ahead=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
+          .bind(name, title, description, timezone, duration, bufferBefore, bufferAfter, notice, maximum, changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare("DELETE FROM booking_availability_rules WHERE workspace_id=? AND calendar_id=?").bind(workspaceId, before.id),
+        ...rules.map((rule) => env.DB.prepare(`INSERT INTO booking_availability_rules(id,workspace_id,calendar_id,day_of_week,start_minute,end_minute,created_at) VALUES(?,?,?,?,?,?,?)`)
+          .bind(id("brule"), workspaceId, before.id, rule.day_of_week, rule.start_minute, rule.end_minute, now)),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'booking_calendar.updated','booking_calendar',?,?,?,?,? WHERE EXISTS(SELECT 1 FROM booking_calendars WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeBookingCalendar(before)), JSON.stringify({ name, title, timezone, duration_minutes: duration, availability: rules }), requestId(request), now, workspaceId, before.id, changeId),
+      ]);
+      if (!results[1].meta.changes || !results.at(-1)?.meta.changes) throw new Error("edit_conflict");
+    } catch { return json({ error: "Calendar changed before it could be saved", code: "edit_conflict" }, 409); }
+    const updated = await env.DB.prepare("SELECT * FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ calendar: safeBookingCalendar(updated!, rules) });
+  }
+  const bookingLifecycleMatch = url.pathname.match(/^\/v1\/admin\/booking-calendars\/(bcal_[a-f0-9]{32})\/(publish|revoke)$/);
+  if (bookingLifecycleMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["if_revision", "confirmation"].includes(key))) return json({ error: "Lifecycle request contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, bookingLifecycleMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Booking calendar not found" }, 404);
+    const action = bookingLifecycleMatch[2]; const expected = action === "publish" ? "PUBLISH CALENDAR" : "REVOKE CALENDAR";
+    if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Calendar changed since it was loaded", code: "edit_conflict" }, 409);
+    if (body.confirmation !== expected) return json({ error: "Explicit lifecycle confirmation is required" }, 400);
+    if (action === "revoke" && before.status !== "published") return json({ error: "Only a published calendar can be revoked" }, 409);
+    const rules = await env.DB.prepare("SELECT day_of_week,start_minute,end_minute FROM booking_availability_rules WHERE workspace_id=? AND calendar_id=?")
+      .bind(workspaceId, before.id).all<BookingRule>();
+    validateBookingRules(rules.results);
+    const status = action === "publish" ? "published" : "revoked"; const now = new Date().toISOString(); const changeId = id("chg");
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE booking_calendars SET status=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=?`)
+        .bind(status, changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,?,'booking_calendar',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM booking_calendars WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, `booking_calendar.${action}ed`, before.id, JSON.stringify(safeBookingCalendar(before)), JSON.stringify({ status }), requestId(request), now, workspaceId, before.id, changeId),
+    ]);
+    if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: `Calendar changed before it could be ${action}ed`, code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>();
+    return json({ calendar: safeBookingCalendar(updated!, rules.results) });
+  }
+  const bookingAppointmentsMatch = url.pathname.match(/^\/v1\/admin\/booking-calendars\/(bcal_[a-f0-9]{32})\/appointments$/);
+  if (bookingAppointmentsMatch && request.method === "GET") {
+    const exists = await env.DB.prepare("SELECT id FROM booking_calendars WHERE workspace_id=? AND id=?").bind(workspaceId, bookingAppointmentsMatch[1]).first();
+    if (!exists) return json({ error: "Booking calendar not found" }, 404);
+    const rows = await env.DB.prepare(`SELECT * FROM booking_appointments WHERE workspace_id=? AND calendar_id=? ORDER BY starts_at DESC,id DESC LIMIT 200`)
+      .bind(workspaceId, bookingAppointmentsMatch[1]).all<Record<string, unknown>>();
+    return json({ appointments: rows.results.map(safeAppointment), truncated: rows.results.length === 200 });
   }
 
   if (url.pathname === "/v1/admin/forms" && request.method === "GET") {
@@ -7353,6 +7725,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM conversation_threads WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_submissions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM booking_appointments WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM booking_availability_rules WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM booking_calendars WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM form_versions WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM forms WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM visitor_intent_cases WHERE workspace_id=?").bind(workspaceId),
@@ -12868,7 +13243,8 @@ const worker = {
       if (usesIndependentCredential(url.pathname)) {
         const independentlyAuthenticated = await api(request, env, url);
         if (independentlyAuthenticated) return independentlyAuthenticated;
-        if (/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) && request.method === "GET") {
+        if ((/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) ||
+          /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(url.pathname)) && request.method === "GET") {
           const response = await handler.fetch(request, env, ctx);
           const headers = new Headers(response.headers);
           for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);

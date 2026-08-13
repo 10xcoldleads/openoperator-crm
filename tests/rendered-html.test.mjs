@@ -80,6 +80,30 @@ test("ships a functional responsive secure forms surface", async () => {
   assert.match(migration, /form_versions_form_version_unique/);
 });
 
+test("ships a functional responsive local-first booking surface", async () => {
+  const [dashboard, workspace, publicBooking, manageBooking, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/BookingWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/book/[slug]/PublicBooking.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/book/[slug]/manage/ManageBooking.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0050_booking_core.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "booking", label: "Booking"/);
+  assert.match(dashboard, /<BookingWorkspace active=\{activeView === "booking"\}/);
+  assert.match(workspace, /PUBLISH CALENDAR/);
+  assert.match(workspace, /REVOKE CALENDAR/);
+  assert.match(publicBooking, /privacy_accepted: privacy/);
+  assert.match(publicBooking, /location\.origin.*\/manage#token=/);
+  assert.match(publicBooking, /No marketing consent is requested/);
+  assert.match(manageBooking, /authorization: `Bearer \$\{token\}`/);
+  assert.match(manageBooking, /"reschedule"/);
+  assert.match(manageBooking, /"cancel"/);
+  assert.match(styles, /@media\(max-width:760px\)\{\.booking-grid\{grid-template-columns:1fr\}/);
+  assert.match(migration, /booking_appointments_calendar_idempotency_unique/);
+  assert.match(migration, /booking_appointments_manage_token_unique/);
+});
+
 test("serves hashed client assets before the Worker while keeping dynamic routes Worker-first", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"run_worker_first": \["\/\*", "!\/assets\/\*"\]/);

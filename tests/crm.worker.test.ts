@@ -99,6 +99,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM form_submissions"),
     env.DB.prepare("DELETE FROM form_versions"),
     env.DB.prepare("DELETE FROM forms"),
+    env.DB.prepare("DELETE FROM booking_appointments"),
+    env.DB.prepare("DELETE FROM booking_availability_rules"),
+    env.DB.prepare("DELETE FROM booking_calendars"),
     env.DB.prepare("DELETE FROM resend_deliveries"),
     env.DB.prepare("DELETE FROM resend_connections"),
     env.DB.prepare("DELETE FROM visitor_intent_cases"),
@@ -692,6 +695,68 @@ describe("authorization and transport security", () => {
       body: JSON.stringify({ ...submissionBody, idempotency_key: "public-form-submit-2" }) })).status).toBe(404);
     const ledger = await call(`/v1/admin/forms/${created.id}/submissions`, { headers: adminHeaders }).then((response) => response.json()) as { submissions: unknown[] };
     expect(ledger.submissions).toHaveLength(1);
+  });
+
+  it("books timezone-safe appointments with lifecycle, replay, conflict, and private management controls", async () => {
+    expect((await call("/v1/admin/booking-calendars", { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ name: "Denied", title: "Denied", timezone: "UTC" }) })).status).toBe(401);
+    const createdResponse = await call("/v1/admin/booking-calendars", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ name: "Strategy desk", title: "Reserve a strategy session", timezone: "UTC" }) });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json() as { calendar: { id: string; slug: string; revision: number } }).calendar;
+    expect((await call(`/v1/public/booking/${created.slug}`)).status).toBe(404);
+    const availability = Array.from({ length: 7 }, (_, day_of_week) => ({ day_of_week, start_minute: 0, end_minute: 1440 }));
+    const updatedResponse = await call(`/v1/admin/booking-calendars/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ name: "Strategy desk", title: "Reserve a strategy session", description: "A focused working session.", timezone: "UTC",
+        duration_minutes: 30, buffer_before_minutes: 10, buffer_after_minutes: 10, minimum_notice_minutes: 0, maximum_days_ahead: 60,
+        availability, if_revision: created.revision }) });
+    expect(updatedResponse.status).toBe(200);
+    const updated = (await updatedResponse.json() as { calendar: { revision: number } }).calendar;
+    const publishRace = await Promise.all([1, 2].map(() => call(`/v1/admin/booking-calendars/${created.id}/publish`, {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: updated.revision, confirmation: "PUBLISH CALENDAR" }),
+    })));
+    expect(publishRace.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='booking_calendar.published' AND entity_id=?")
+      .bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    const definitionResponse = await call(`/v1/public/booking/${created.slug}?days=2`);
+    expect(definitionResponse.status).toBe(200);
+    const definition = await definitionResponse.json() as { slots: Array<{ starts_at: string; ends_at: string }>; provider: unknown };
+    expect(definition.provider).toEqual({ mode: "local", external_sync: false });
+    expect(definition.slots.length).toBeGreaterThan(1);
+    const chosen = definition.slots.find((slot) => Date.parse(slot.starts_at) > Date.now() + 60_000)!;
+    const booking = { name: "Booking Lead", email: "BOOKING.LEAD@example.com", phone: "+15555550100", visitor_timezone: "Europe/Vienna",
+      starts_at: chosen.starts_at, privacy_accepted: true, website: "", idempotency_key: "booking-public-test-1" };
+    expect((await call(`/v1/public/booking/${created.slug}/appointments`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...booking, privacy_accepted: false }) })).status).toBe(400);
+    expect((await call(`/v1/public/booking/${created.slug}/appointments`, { method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...booking, website: "spam.example" }) })).status).toBe(202);
+    const races = await Promise.all([booking, { ...booking, email: "other@example.com", name: "Other Lead", idempotency_key: "booking-public-test-2" }]
+      .map((body) => call(`/v1/public/booking/${created.slug}/appointments`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(body) })));
+    expect(races.map((response) => response.status).sort()).toEqual([201, 409]);
+    const winning = races.find((response) => response.status === 201)!;
+    const winningBody = await winning.json() as { manage_token: string; appointment: { id: string; revision: number } };
+    expect(winningBody.manage_token).toMatch(/^bman_[a-f0-9]{64}$/);
+    expect((await env.DB.prepare("SELECT manage_token_hash FROM booking_appointments WHERE id=?").bind(winningBody.appointment.id)
+      .first<{ manage_token_hash: string }>())?.manage_token_hash).not.toBe(winningBody.manage_token);
+    const winningRequest = races[0].status === 201 ? booking : { ...booking, email: "other@example.com", name: "Other Lead", idempotency_key: "booking-public-test-2" };
+    expect((await call(`/v1/public/booking/${created.slug}/appointments`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(winningRequest) })).status).toBe(200);
+    expect((await call("/v1/public/appointments/manage", { headers: { authorization: "Bearer bman_invalid" } })).status).toBe(401);
+    const managed = await call("/v1/public/appointments/manage", { headers: { authorization: `Bearer ${winningBody.manage_token}` } });
+    expect(managed.status).toBe(200);
+    const managedBody = await managed.json() as { appointment: { revision: number } };
+    const cancelRace = await Promise.all([1, 2].map(() => call("/v1/public/appointments/manage", { method: "POST", headers: { ...jsonHeaders,
+      authorization: `Bearer ${winningBody.manage_token}` }, body: JSON.stringify({ action: "cancel", if_revision: managedBody.appointment.revision }) })));
+    expect(cancelRace.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='booking.cancelled' AND entity_id=?")
+      .bind(winningBody.appointment.id).first<{ total: number }>())?.total).toBe(1);
+    const reopened = await call(`/v1/public/booking/${created.slug}?date_from=${chosen.starts_at.slice(0, 10)}&days=1`).then((response) => response.json()) as { slots: Array<{ starts_at: string }> };
+    expect(reopened.slots.map((slot) => slot.starts_at)).toContain(chosen.starts_at);
+    const detail = await call(`/v1/admin/booking-calendars/${created.id}`, { headers: adminHeaders }).then((response) => response.json()) as { calendar: { revision: number } };
+    expect((await call(`/v1/admin/booking-calendars/${created.id}/revoke`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ if_revision: detail.calendar.revision, confirmation: "REVOKE CALENDAR" }) })).status).toBe(200);
+    expect((await call(`/v1/public/booking/${created.slug}`)).status).toBe(404);
+    const ledger = await call(`/v1/admin/booking-calendars/${created.id}/appointments`, { headers: adminHeaders }).then((response) => response.json()) as { appointments: unknown[] };
+    expect(ledger.appointments).toHaveLength(1);
   });
 
   it("governs typed contact fields as workspace metadata without discarding archived values", async () => {

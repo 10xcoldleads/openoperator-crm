@@ -570,6 +570,42 @@ export const formSubmissions = sqliteTable("form_submissions", {
   index("form_submissions_form_recent_idx").on(table.workspaceId, table.formId, table.submittedAt, table.id),
 ]);
 
+export const bookingCalendars = sqliteTable("booking_calendars", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(), slug: text("slug").notNull(), status: text("status", { enum: ["draft", "published", "revoked"] }).notNull().default("draft"),
+  title: text("title").notNull(), description: text("description").notNull().default(""), timezone: text("timezone").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(), bufferBeforeMinutes: integer("buffer_before_minutes").notNull().default(0),
+  bufferAfterMinutes: integer("buffer_after_minutes").notNull().default(0), minimumNoticeMinutes: integer("minimum_notice_minutes").notNull().default(60),
+  maximumDaysAhead: integer("maximum_days_ahead").notNull().default(60), revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("booking_calendars_slug_unique").on(table.slug), index("booking_calendars_workspace_updated_idx").on(table.workspaceId, table.updatedAt, table.id)]);
+
+export const bookingAvailabilityRules = sqliteTable("booking_availability_rules", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  calendarId: text("calendar_id").notNull().references(() => bookingCalendars.id, { onDelete: "cascade" }),
+  dayOfWeek: integer("day_of_week").notNull(), startMinute: integer("start_minute").notNull(), endMinute: integer("end_minute").notNull(), createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("booking_rules_calendar_day_window_unique").on(table.workspaceId, table.calendarId, table.dayOfWeek, table.startMinute, table.endMinute),
+  index("booking_rules_calendar_day_idx").on(table.workspaceId, table.calendarId, table.dayOfWeek),
+]);
+
+export const bookingAppointments = sqliteTable("booking_appointments", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  calendarId: text("calendar_id").notNull().references(() => bookingCalendars.id, { onDelete: "restrict" }),
+  contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "restrict" }), idempotencyKey: text("idempotency_key").notNull(),
+  name: text("name").notNull(), email: text("email").notNull(), phone: text("phone"), visitorTimezone: text("visitor_timezone").notNull(),
+  startsAt: text("starts_at").notNull(), endsAt: text("ends_at").notNull(), status: text("status", { enum: ["booked", "cancelled"] }).notNull().default("booked"),
+  manageTokenHash: text("manage_token_hash").notNull(), externalProvider: text("external_provider"), externalEventId: text("external_event_id"),
+  syncStatus: text("sync_status", { enum: ["local", "pending", "synced", "failed"] }).notNull().default("local"), cancelledAt: text("cancelled_at"),
+  cancellationReason: text("cancellation_reason"), revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("booking_appointments_calendar_idempotency_unique").on(table.workspaceId, table.calendarId, table.idempotencyKey),
+  uniqueIndex("booking_appointments_calendar_start_active_unique").on(table.workspaceId, table.calendarId, table.startsAt).where(sql`${table.status} = 'booked'`),
+  uniqueIndex("booking_appointments_manage_token_unique").on(table.manageTokenHash),
+  index("booking_appointments_calendar_range_idx").on(table.workspaceId, table.calendarId, table.status, table.startsAt, table.endsAt),
+]);
+
 export const agentWorkspaceRateWindows = sqliteTable("agent_workspace_rate_windows", {
   workspaceId: text("workspace_id").primaryKey().references(() => workspaces.id),
   windowStart: integer("window_start").notNull(),
