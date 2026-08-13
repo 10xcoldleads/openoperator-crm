@@ -606,6 +606,23 @@ export const bookingAppointments = sqliteTable("booking_appointments", {
   index("booking_appointments_calendar_range_idx").on(table.workspaceId, table.calendarId, table.status, table.startsAt, table.endsAt),
 ]);
 
+export const paymentLedgerEntries = sqliteTable("payment_ledger_entries", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").references(() => contacts.id, { onDelete: "restrict" }),
+  opportunityId: text("opportunity_id").references(() => opportunities.id, { onDelete: "restrict" }),
+  parentEntryId: text("parent_entry_id"), idempotencyKey: text("idempotency_key").notNull(),
+  kind: text("kind", { enum: ["payment", "refund", "dispute", "dispute_reversal"] }).notNull(),
+  amountMinor: integer("amount_minor").notNull(), currency: text("currency").notNull(), description: text("description").notNull(),
+  provider: text("provider", { enum: ["manual"] }).notNull().default("manual"), providerReference: text("provider_reference"),
+  occurredAt: text("occurred_at").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("payment_ledger_workspace_idempotency_unique").on(table.workspaceId, table.idempotencyKey),
+  uniqueIndex("payment_ledger_provider_reference_unique").on(table.workspaceId, table.provider, table.providerReference),
+  index("payment_ledger_workspace_occurred_idx").on(table.workspaceId, table.occurredAt, table.id),
+  index("payment_ledger_parent_idx").on(table.workspaceId, table.parentEntryId, table.occurredAt, table.id),
+  index("payment_ledger_contact_idx").on(table.workspaceId, table.contactId, table.occurredAt, table.id),
+]);
+
 export const agentWorkspaceRateWindows = sqliteTable("agent_workspace_rate_windows", {
   workspaceId: text("workspace_id").primaryKey().references(() => workspaces.id),
   windowStart: integer("window_start").notNull(),

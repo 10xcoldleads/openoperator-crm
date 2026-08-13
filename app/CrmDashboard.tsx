@@ -23,6 +23,7 @@ import ConversationsWorkspace from "./ConversationsWorkspace";
 import FormsWorkspace from "./FormsWorkspace";
 import BookingWorkspace from "./BookingWorkspace";
 import ReportingWorkspace from "./ReportingWorkspace";
+import PaymentsWorkspace from "./PaymentsWorkspace";
 
 const VisualAutomationBuilder = lazy(() => import("./VisualAutomationBuilder"));
 
@@ -721,20 +722,21 @@ type CommandEntry =
   | { id: string; kind: "contact"; label: string; description: string; record: Contact }
   | { id: string; kind: "company"; label: string; description: string; record: Company }
   | { id: string; kind: "opportunity"; label: string; description: string; record: Opportunity };
-type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "booking" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
+type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "booking" | "payments" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
 type IntegrationDomain = "mailboxes" | "agents" | "sources" | "webhooks";
 type IntegrationCatalogView = "catalog" | "installed";
 type LeadView = "inbox" | "contacts" | "companies" | "visitors";
 type ContactDrawerTab = "overview" | "timeline" | "related";
 type OpportunityDrawerTab = "overview" | "intelligence" | "execution" | "agent";
 type CompanyDrawerTab = "overview" | "relationships" | "timeline";
-const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; group: "Workspace" | "Intelligence" | "System" }> = [
+const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; group: "Workspace" | "Intelligence" | "System"; adminOnly?: boolean }> = [
   { id: "dashboard", label: "Dashboard", icon: "D", group: "Workspace" },
   { id: "leads", label: "Contacts", icon: "C", group: "Workspace" },
   { id: "pipeline", label: "Opportunities", icon: "O", group: "Workspace" },
   { id: "conversations", label: "Conversations", icon: "M", group: "Workspace" },
   { id: "forms", label: "Forms", icon: "F", group: "Workspace" },
   { id: "booking", label: "Booking", icon: "B", group: "Workspace" },
+  { id: "payments", label: "Payments", icon: "$", group: "Workspace", adminOnly: true },
   { id: "tasks", label: "Calendar & tasks", icon: "T", group: "Workspace" },
   { id: "reports", label: "Reports", icon: "R", group: "Intelligence" },
   { id: "agent", label: "Agent work", icon: "A", group: "Intelligence" },
@@ -1582,7 +1584,7 @@ export default function CrmDashboard() {
   }, [activeView, leadView, loadVisitorIntent]);
 
   const commandNavigation = useMemo<CommandEntry[]>(() => [
-    ...workspaceViews.map((view) => ({
+    ...workspaceViews.filter((view) => !view.adminOnly || control?.role === "owner" || control?.role === "admin").map((view) => ({
       id: `nav:${view.id}`,
       kind: "navigation" as const,
       label: view.label,
@@ -1592,7 +1594,7 @@ export default function CrmDashboard() {
     { id: "nav:contacts", kind: "navigation", label: "All Contacts", description: "Search and manage every person", view: "leads", leadView: "contacts" },
     { id: "nav:companies", kind: "navigation", label: "Companies", description: "Open account intelligence", view: "leads", leadView: "companies" },
     { id: "nav:visitors", kind: "navigation", label: "Visitor Intent", description: "Review identified website visitors outside the lead database", view: "leads", leadView: "visitors" },
-  ], []);
+  ], [control?.role]);
   const commandEntries = useMemo<CommandEntry[]>(() => {
     const normalized = commandQuery.trim().toLowerCase();
     const navigation = commandNavigation.filter((entry) =>
@@ -4803,7 +4805,7 @@ export default function CrmDashboard() {
       <nav aria-label="CRM workspace">
         {(["Workspace", "Intelligence", "System"] as const).map((group) => <div className="nav-group" key={group}>
           <p>{group}</p>
-          {workspaceViews.filter((view) => view.group === group).map((view) => <button key={view.id} className={activeView === view.id ? "active" : ""} aria-label={view.label} title={view.label} aria-current={activeView === view.id ? "page" : undefined} onClick={() => { setActiveView(view.id); setError(""); setNotice(""); if (view.id === "agent") void load(); }}>
+          {workspaceViews.filter((view) => view.group === group && (!view.adminOnly || canAdmin)).map((view) => <button key={view.id} className={activeView === view.id ? "active" : ""} aria-label={view.label} title={view.label} aria-current={activeView === view.id ? "page" : undefined} onClick={() => { setActiveView(view.id); setError(""); setNotice(""); if (view.id === "agent") void load(); }}>
             <i aria-hidden="true">{view.icon}</i><span>{view.label}</span>
           </button>)}
         </div>)}
@@ -4829,6 +4831,7 @@ export default function CrmDashboard() {
       <FormsWorkspace active={activeView === "forms"} canAdmin={Boolean(canAdmin)}/>
       <BookingWorkspace active={activeView === "booking"} canAdmin={Boolean(canAdmin)}/>
       <ReportingWorkspace active={activeView === "reports"}/>
+      <PaymentsWorkspace active={activeView === "payments" && Boolean(canAdmin)}/>
       <section className="metrics" hidden={activeView !== "dashboard"}>
         <article><i aria-hidden="true">◎</i><span>TOTAL CONTACTS</span><strong>{data?.metrics.contacts ?? "—"}</strong><small>Across connected sources</small></article>
         <article><i aria-hidden="true">↗</i><span>CUSTOMERS</span><strong>{data?.metrics.customers ?? "—"}</strong><small>Paying relationships</small></article>

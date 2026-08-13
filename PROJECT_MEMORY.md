@@ -28,7 +28,7 @@ This is not a pixel clone and not a promise to reproduce every HighLevel feature
 
 ## Current proven baseline
 
-Merged foundation, Conversations, secure Forms, and local-first Booking milestones to `main` on 2026-08-13; current main is `ed7a1e1` through PR #9.
+Merged foundation, Conversations, secure Forms, local-first Booking, and truthful first-party Reporting milestones to `main` on 2026-08-13; current main is `3a8e123` through PR #10.
 
 Visible and functional:
 
@@ -41,13 +41,15 @@ Visible and functional:
 - Source credentials, webhooks, mailbox metadata, Resend transactional delivery, operations health, encrypted recovery, and launch readiness
 - Consent-aware Conversations with persisted email threads, explicit mailbox sync, delivery receipts, permission/suppression evidence, and replay-safe Resend sending
 - Versioned secure Forms with public intake, separate privacy/marketing choices, revocation, and submission evidence
+- Local-first Booking with governed publication, public availability, replay-safe booking, and private reschedule/cancel tokens
+- Truthful first-party Reporting with bounded cohorts, permission-aware pipeline snapshots, and currency-separated values
+- Admin-only provider-neutral Payments register with immutable manual payment/refund/dispute/reversal events and currency-separated balances (proven on the active branch; pending merge)
 - Workspace membership, roles, permission policies, Cloudflare Access JWT validation, and fail-closed production behavior
 
 Explicitly omitted from navigation:
 
-- Calendar-provider sync (public local-first Booking is implemented on the active branch)
 - Sites and surveys builders
-- Payments and reconciliation
+- Calendar-provider sync; payment processors, banking, invoices, payouts, settlements, FX conversion, and reconciliation
 - Marketing/social publishing
 - Reputation management
 - Full attribution, ads, and call reporting
@@ -58,8 +60,8 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 ## Evidence at the baseline
 
 - GitHub PRs #1 and #7: `verify`, CodeQL, and security checks passed from clean Ubuntu checkouts.
-- Current local acceptance before Reporting release: 35 rendered UI/security tests.
-- Worker/D1 acceptance: all 190 tests across stress, extended, domain, auth, MCP, and platform shards.
+- Current local acceptance on the Payments branch: 36 rendered UI/security tests.
+- Worker/D1 acceptance: all 191 tests across stress, extended, domain, auth, MCP, and platform shards.
 - Edge ingestion: 25 tests.
 - TypeScript and ESLint: clean.
 - Dependency audit: zero known npm vulnerabilities at merge time.
@@ -86,18 +88,23 @@ Authoritative detail: `docs/FEATURE_TRUTH_MATRIX.md`.
 | Reporting uses bounded created-record cohorts | Current state can be shown honestly without pretending the system has historical transition events it never stored. |
 | First-touch is directional, never causal attribution | A retained source label is evidence of grouping, not proof that a channel caused revenue. |
 | Monetary values remain separated by currency | Reporting never silently adds unlike currencies without an explicit FX normalization source. |
+| Payment corrections are new immutable events | Money history is append-only: refunds, disputes, and reversals reference an original payment instead of rewriting it. |
+| Manual payment boundary precedes provider adapters | The CRM can truthfully record verified off-platform money events without pretending Stripe, banking, invoices, payouts, or settlements are connected. |
+| Payment retries are idempotent and adjustments are bounded atomically | Retries cannot duplicate money events; concurrent refunds/disputes cannot exceed the original payment, and reversals cannot exceed disputed value. |
 
 ## Current workstream
 
-Branch to publish: `agent/first-party-reporting`.
+Active branch: `agent/payment-ledger`; PR not opened yet.
 
-Booking merged through PR #9 after `verify`, CodeQL, and GitGuardian passed. First-party Reporting is completed locally: 7/30/90-day UTC cohorts, daily record arrival, contact lifecycle distribution, first-touch source grouping, permission-aware opportunity snapshots, pipeline-stage distribution, and currency-separated value registers. The surface explicitly labels snapshot data as non-historical and source grouping as non-causal. Publish and merge only through green CI.
+Booking merged through PR #9 and first-party Reporting through PR #10. The provider-neutral Payments milestone is implemented and locally proven on the active branch. It adds migration `0051`, admin-only APIs, immutable/idempotent payment events, bounded append-only adjustments, recovery validation, contact/opportunity selectors, currency-separated balances, explicit manual-provider disclosures, and a responsive ledger UI. Pending work is remote review: commit, push, PR, clean Linux `verify`, CodeQL, and GitGuardian before merge.
 
-Reporting evidence on 2026-08-13: `npm test` passed (35 rendered/runtime checks, all 190 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; `npm audit --omit=dev --audit-level=high` reported zero vulnerabilities. Aggregation tests prove bounded range rejection, cohort exclusion, lifecycle/source grouping, currency separation, and opportunity-permission redaction. Edge proved filter changes, methodology disclosures, zero application console errors, and a 390px body with exact 390px width while the wide source register scrolls internally. Clean Linux CI and PR merge remain required.
+Reporting evidence on 2026-08-13: `npm test` passed (35 rendered/runtime checks, all 190 worker tests across six shards, and 25 ingestion tests); TypeScript and ESLint passed; Twenty provenance passed; npm audit reported zero vulnerabilities. Aggregation tests prove bounded range rejection, cohort exclusion, lifecycle/source grouping, currency separation, and opportunity-permission redaction. Edge proved filter changes, methodology disclosures, zero application console errors, and 390px body containment with an internally scrolling source register. PR #10 clean Linux `verify`, CodeQL, and GitGuardian passed before merge.
+
+Payments local evidence on 2026-08-13: `npm test` passed (36 rendered/runtime checks, all 191 Worker tests across six supported shards, and 25 ingestion tests); TypeScript, ESLint, Twenty provenance, and build passed; production `npm audit` reported zero vulnerabilities. Worker acceptance proves admin isolation, immutable rows, idempotent replay, provider-reference uniqueness, currency matching, atomic concurrent adjustment caps, audit atomicity, and recovery-table coverage. Edge proved a real $125.50 manual payment followed by a linked $25.50 refund, correct $100.00 net/$125.50 gross/$25.50 refunded balances, explicit no-provider/no-FX disclosures, zero application console errors, and 390px body containment with only the ledger tape scrolling internally. Browser QA also caught and drove the repair of a non-opening adjustment editor before this evidence was recorded.
 
 ## Next milestone sequence
 
-1. Payments: provider-neutral ledger before any Stripe surface.
+1. Finish Payments remote gates and merge the provider-neutral ledger; provider adapters remain a later independent slice.
 2. Sites and surveys: separate versioned publish/respond lifecycles; do not dilute the proven Forms contract.
 
 Reorder only when new evidence changes risk or dependency order; record the decision here.

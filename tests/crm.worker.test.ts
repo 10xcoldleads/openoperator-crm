@@ -102,6 +102,8 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM booking_appointments"),
     env.DB.prepare("DELETE FROM booking_availability_rules"),
     env.DB.prepare("DELETE FROM booking_calendars"),
+    env.DB.prepare("DELETE FROM payment_ledger_entries WHERE parent_entry_id IS NOT NULL"),
+    env.DB.prepare("DELETE FROM payment_ledger_entries WHERE parent_entry_id IS NULL"),
     env.DB.prepare("DELETE FROM resend_deliveries"),
     env.DB.prepare("DELETE FROM resend_connections"),
     env.DB.prepare("DELETE FROM visitor_intent_cases"),
@@ -826,6 +828,62 @@ describe("authorization and transport security", () => {
     expect(restrictedBody.source_first_touch.rows[0]).not.toHaveProperty("won_contacts");
   });
 
+  it("keeps a provider-neutral payment ledger immutable, replay-safe, currency-safe, and adjustment-bounded", async () => {
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at)
+      VALUES('mem_payment_member','ws_openoperator','payment-member@example.com','member',1,?)`).bind(now).run();
+    expect((await call("/v1/admin/payments/ledger", { headers: { "oai-authenticated-user-email": "payment-member@example.com" } })).status).toBe(403);
+    await env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,status,stage,score,tags,custom_fields,created_at,updated_at)
+      VALUES('con_payment_test','ws_openoperator','payer@example.com','customer','won',0,'[]','{}',?,?)`).bind(now, now).run();
+    const paymentBody = { contact_id: "con_payment_test", amount_minor: 12500, currency: "usd", description: "Strategy engagement",
+      occurred_at: now, idempotency_key: "manual-payment-test-1", provider_reference: "receipt-1001", confirmation: "RECORD PAYMENT" };
+    expect((await call("/v1/admin/payments/ledger", { method: "POST", headers: jsonHeaders, body: JSON.stringify(paymentBody) })).status).toBe(401);
+    const createdResponse = await call("/v1/admin/payments/ledger", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(paymentBody) });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json() as { entry: { id: string; currency: string } }).entry;
+    expect(created.currency).toBe("USD");
+    expect((await call("/v1/admin/payments/ledger", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(paymentBody) })).status).toBe(200);
+    expect((await call("/v1/admin/payments/ledger", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...paymentBody, amount_minor: 1 }) })).status).toBe(409);
+    expect((await call("/v1/admin/payments/ledger", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...paymentBody,
+      idempotency_key: "manual-payment-test-2", provider_reference: "receipt-1001" }) })).status).toBe(409);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='payment.recorded' AND entity_id=?")
+      .bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    await expect(env.DB.prepare("UPDATE payment_ledger_entries SET amount_minor=1 WHERE id=?").bind(created.id).run()).rejects.toThrow(/immutable/);
+
+    const refund = { kind: "refund", amount_minor: 2500, currency: "USD", description: "Partial refund", occurred_at: now,
+      idempotency_key: "manual-refund-test-1", provider_reference: "refund-1001", confirmation: "RECORD REFUND" };
+    const refundResponse = await call(`/v1/admin/payments/ledger/${created.id}/adjustments`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(refund) });
+    expect(refundResponse.status).toBe(201);
+    expect((await call(`/v1/admin/payments/ledger/${created.id}/adjustments`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(refund) })).status).toBe(200);
+    expect((await call(`/v1/admin/payments/ledger/${created.id}/adjustments`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...refund,
+      currency: "EUR", idempotency_key: "manual-refund-test-2", provider_reference: "refund-1002" }) })).status).toBe(400);
+    const refundRace = await Promise.all([1, 2].map((index) => call(`/v1/admin/payments/ledger/${created.id}/adjustments`, { method: "POST",
+      headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...refund, amount_minor: 10000, idempotency_key: `manual-refund-race-${index}`,
+        provider_reference: `refund-race-${index}` }) })));
+    expect(refundRace.map((response) => response.status).sort()).toEqual([201, 409]);
+    expect((await env.DB.prepare("SELECT SUM(amount_minor) total FROM payment_ledger_entries WHERE parent_entry_id=? AND kind='refund'")
+      .bind(created.id).first<{ total: number }>())?.total).toBe(12500);
+
+    const disputedPayment = await call("/v1/admin/payments/ledger", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...paymentBody,
+      amount_minor: 5000, idempotency_key: "manual-payment-dispute-1", provider_reference: "receipt-1002" }) }).then((response) => response.json()) as { entry: { id: string } };
+    const disputeBody = { kind: "dispute", amount_minor: 3000, currency: "USD", description: "Cardholder dispute", occurred_at: now,
+      idempotency_key: "manual-dispute-test-1", confirmation: "RECORD DISPUTE" };
+    expect((await call(`/v1/admin/payments/ledger/${disputedPayment.entry.id}/adjustments`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(disputeBody) })).status).toBe(201);
+    const reversal = { ...disputeBody, kind: "dispute_reversal", amount_minor: 2000, description: "Dispute won",
+      idempotency_key: "manual-reversal-test-1", confirmation: "RECORD DISPUTE REVERSAL" };
+    expect((await call(`/v1/admin/payments/ledger/${disputedPayment.entry.id}/adjustments`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(reversal) })).status).toBe(201);
+    expect((await call(`/v1/admin/payments/ledger/${disputedPayment.entry.id}/adjustments`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...reversal,
+      amount_minor: 1001, idempotency_key: "manual-reversal-test-2" }) })).status).toBe(409);
+
+    const ledger = await call("/v1/admin/payments/ledger", { headers: adminHeaders }).then((response) => response.json()) as {
+      entries: unknown[]; balances: Array<Record<string, unknown>>; provider_boundary: unknown; accounting: unknown };
+    expect(ledger.entries).toHaveLength(6);
+    expect(ledger.balances).toEqual([expect.objectContaining({ currency: "USD", gross_minor: 17500, refunded_minor: 12500,
+      disputed_minor: 1000, net_minor: 4000 })]);
+    expect(ledger.provider_boundary).toEqual({ mode: "manual", external_providers: false });
+    expect(ledger.accounting).toEqual({ amounts: "integer minor units", model: "append-only events", currency_conversion: false });
+  });
+
   it("governs typed contact fields as workspace metadata without discarding archived values", async () => {
     expect((await call("/v1/admin/custom-fields")).status).toBe(401);
     const createdResponse = await call("/v1/admin/custom-fields", {
@@ -1245,6 +1303,8 @@ describe("authorization and transport security", () => {
       [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}/revoke`, "POST"],
       [`/v1/admin/booking-calendars/bcal_${"a".repeat(32)}/appointments`, "GET"],
       ["/v1/admin/reports/revenue-funnel", "GET"],
+      ["/v1/admin/payments/ledger", "GET, POST"],
+      [`/v1/admin/payments/ledger/pay_${"a".repeat(32)}/adjustments`, "POST"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}`, "GET, PATCH"],
       ["/v1/admin/companies/duplicates", "GET"],
       [`/v1/admin/companies/cmp_${"a".repeat(32)}/merge-preview`, "POST"],
