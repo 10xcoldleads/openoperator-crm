@@ -60,7 +60,12 @@ async function authenticatedRequest(request: Request, env: FrameworkEnv): Promis
       throw new ApiError(401, "Invalid Cloudflare Access authentication");
     }
   }
-  if (env.ALLOW_INSECURE_LOCAL_AUTH === "true") return request;
+  if (env.ALLOW_INSECURE_LOCAL_AUTH === "true") {
+    if (request.headers.get("oai-authenticated-user-email")) return request;
+    const local = new Request(request);
+    local.headers.set("oai-authenticated-user-email", "owner@example.com");
+    return local;
+  }
   throw new ApiError(503, "Authentication is not configured");
 }
 type Json = Record<string, unknown>;
