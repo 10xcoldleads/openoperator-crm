@@ -3330,7 +3330,8 @@ async function agentWorkItemRequeueAuditStatement(
   workItemId: string,
   before: unknown,
   after: unknown,
-  updatedAt: string,
+  expectedUpdatedAt: string,
+  requeueAt: string,
 ) {
   const ip = request.headers.get("cf-connecting-ip");
   const ipHash = ip ? await sha256(ip) : null;
@@ -3338,9 +3339,10 @@ async function agentWorkItemRequeueAuditStatement(
     (id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,ip_hash,created_at)
     SELECT ?,?,'user',?,'agent.work_item_requeued','agent_work_item',?,?,?,?,?,?
     WHERE EXISTS(SELECT 1 FROM agent_work_items
-      WHERE workspace_id=? AND id=? AND status='queued' AND updated_at=?)`)
+      WHERE workspace_id=? AND id=? AND updated_at=?
+        AND (status='failed' OR (status='claimed' AND claim_expires_at<=?)))`)
     .bind(id("audit"), access.workspaceId, access.email, workItemId, JSON.stringify(before), JSON.stringify(after),
-      requestId(request), ipHash, updatedAt, access.workspaceId, workItemId, updatedAt);
+      requestId(request), ipHash, requeueAt, access.workspaceId, workItemId, expectedUpdatedAt, requeueAt);
 }
 
 async function agentWorkItemCancelAuditStatement(
@@ -9303,8 +9305,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const before = await env.DB.prepare(`SELECT * FROM agent_work_items WHERE workspace_id=? AND id=?`)
       .bind(workspaceId, agentWorkItemRequeueMatch[1]).first<Record<string, unknown>>();
     if (!before) return json({ error: "Agent work item not found" }, 404);
+    const requeueAt = new Date().toISOString();
     const expiredClaim = before.status === "claimed" && typeof before.claim_expires_at === "string" &&
-      before.claim_expires_at <= new Date().toISOString();
+      before.claim_expires_at <= requeueAt;
     if (before.status !== "failed" && !expiredClaim) {
       return json({ error: "Only failed or lease-expired agent work can be requeued", code: "work_item_not_requeueable" }, 409);
     }
@@ -9312,15 +9315,15 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const after = { ...before, status: "queued", claimed_by_credential_id: null, claim_expires_at: null,
       result: null, completed_at: null, updated_at: updatedAt };
     const requeued = await env.DB.batch([
+      await agentWorkItemRequeueAuditStatement(env, access, request,
+        agentWorkItemRequeueMatch[1], before, after, expectedUpdatedAt, requeueAt),
       env.DB.prepare(`UPDATE agent_work_items
         SET status='queued',claimed_by_credential_id=NULL,claim_expires_at=NULL,result=NULL,completed_at=NULL,updated_at=?
         WHERE workspace_id=? AND id=? AND updated_at=?
           AND (status='failed' OR (status='claimed' AND claim_expires_at<=?))`)
-        .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, new Date().toISOString()),
-      await agentWorkItemRequeueAuditStatement(env, access, request,
-        agentWorkItemRequeueMatch[1], before, after, updatedAt),
+        .bind(updatedAt, workspaceId, agentWorkItemRequeueMatch[1], expectedUpdatedAt, requeueAt),
     ]);
-    if (!requeued[0].meta.changes) {
+    if (!requeued[1].meta.changes) {
       return json({ error: "Agent work item changed before it could be requeued", code: "edit_conflict" }, 409);
     }
     return json({ ok: true, work_item: after });
