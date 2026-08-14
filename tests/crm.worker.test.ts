@@ -77,6 +77,18 @@ async function signWebhook(secret: string, timestamp: string, body: string) {
   return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function signTwilio(authToken: string, url: string, body: string) {
+  const params = new URLSearchParams(body);
+  const values = new Map<string, string>();
+  for (const [key, value] of params) values.set(key, value);
+  let payload = url;
+  for (const key of [...values.keys()].sort()) payload += key + values.get(key);
+  const hmacKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(authToken),
+    { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const signature = new Uint8Array(await crypto.subtle.sign("HMAC", hmacKey, new TextEncoder().encode(payload)));
+  return btoa(String.fromCharCode(...signature));
+}
+
 beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM workspace_operation_leases"),
@@ -93,6 +105,11 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM agent_runs"),
     env.DB.prepare("DELETE FROM automation_runs"),
     env.DB.prepare("DELETE FROM mailbox_connections"),
+    env.DB.prepare("DELETE FROM twilio_webhook_receipts"),
+    env.DB.prepare("DELETE FROM sms_messages"),
+    env.DB.prepare("DELETE FROM sms_threads"),
+    env.DB.prepare("DELETE FROM sms_consents"),
+    env.DB.prepare("DELETE FROM twilio_connections"),
     env.DB.prepare("DELETE FROM conversation_messages"),
     env.DB.prepare("DELETE FROM conversation_threads"),
     env.DB.prepare("DELETE FROM review_feedback"),
@@ -143,6 +160,7 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM custom_object_views"),
     env.DB.prepare("DELETE FROM custom_object_definitions"),
     env.DB.prepare("DELETE FROM custom_field_definitions"),
+    env.DB.prepare("DELETE FROM crm_custom_values"),
     env.DB.prepare("DELETE FROM contacts"),
     env.DB.prepare("DELETE FROM companies"),
     env.DB.prepare("DELETE FROM sources"),
@@ -518,6 +536,142 @@ describe("authorization and transport security", () => {
       method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
     })).status).toBe(409);
     outboundFetch.mockRestore();
+  });
+
+  it("uses governed custom values and runs Twilio SMS with consent, variables, signed callbacks, and STOP suppression", async () => {
+    const customValueResponse = await call("/v1/admin/custom-values", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        value_key: "support_phone", label: "Support phone", value: "+15551239999", folder: "Messaging",
+      }),
+    });
+    expect(customValueResponse.status).toBe(201);
+    const customValue = (await customValueResponse.json() as { value: { id: string; revision: number; token: string } }).value;
+    expect(customValue.token).toBe("{{custom_values.support_phone}}");
+    expect((await call("/v1/admin/custom-values", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        value_key: "api_token", label: "Unsafe", value: "do-not-store-secrets-here",
+      }),
+    })).status).toBe(400);
+    expect((await call(`/v1/admin/custom-values/${customValue.id}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        value: "+15551238888", if_revision: customValue.revision,
+      }),
+    })).status).toBe(200);
+
+    const now = new Date().toISOString();
+    const contactId = "con_11111111111111111111111111111111";
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO custom_field_definitions
+        (id,workspace_id,object_type,field_key,label,field_type,options,required,active,position,revision,change_id,created_by,created_at,updated_at)
+        VALUES('cfld_11111111111111111111111111111111','ws_openoperator','contact','service_plan','Service plan','text','[]',0,1,0,1,'chg_sms_field','owner@example.com',?,?)`).bind(now, now),
+      env.DB.prepare(`INSERT INTO contacts
+        (id,workspace_id,email,first_name,last_name,phone,status,stage,score,tags,custom_fields,created_at,updated_at)
+        VALUES(?,'ws_openoperator','sms@example.com','SMS','Lead','+15551230001','lead','new',0,'[]','{"service_plan":"Growth"}',?,?)`)
+        .bind(contactId, now, now),
+    ]);
+
+    const accountSid = `AC${"a".repeat(32)}`; const serviceSid = `MG${"b".repeat(32)}`;
+    const authToken = "c".repeat(32); const outboundSid = `SM${"d".repeat(32)}`; const inboundSid = `SM${"e".repeat(32)}`;
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const requestUrl = String(input);
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Basic ${btoa(`${accountSid}:${authToken}`)}`);
+      if (requestUrl.includes(`/Accounts/${accountSid}.json`)) return Response.json({ sid: accountSid, status: "active" });
+      if (requestUrl.includes(`/Services/${serviceSid}`)) return Response.json({
+        sid: serviceSid, account_sid: accountSid, friendly_name: "CRM messaging", inbound_request_url: null,
+        use_inbound_webhook_on_number: false,
+      });
+      const payload = new URLSearchParams(String(init?.body));
+      expect(payload.get("MessagingServiceSid")).toBe(serviceSid);
+      expect(payload.get("To")).toBe("+15551230001");
+      expect(payload.get("Body")).toBe("Hi SMS — Growth support: +15551238888");
+      expect(payload.get("StatusCallback")).toMatch(/\/v1\/hooks\/twilio\/status\/twc_[a-f0-9]{32}$/);
+      return Response.json({ sid: outboundSid, status: "queued", from: "+15551230000" }, { status: 201 });
+    });
+
+    const createdResponse = await call("/v1/admin/twilio-connection", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        label: "CRM messaging", account_sid: accountSid, auth_token: authToken, messaging_service_sid: serviceSid,
+      }),
+    });
+    expect(createdResponse.status).toBe(201);
+    const connection = (await createdResponse.json() as { connection: { id: string; revision: number; status: string } }).connection;
+    expect(connection).toMatchObject({ revision: 1, status: "pending" });
+    expect(JSON.stringify(await call("/v1/admin/twilio-connection", { headers: adminHeaders })
+      .then((response) => response.json()))).not.toContain(authToken);
+    const storedConnection = await env.DB.prepare("SELECT auth_token_ciphertext FROM twilio_connections WHERE id=?")
+      .bind(connection.id).first<{ auth_token_ciphertext: string }>();
+    expect(storedConnection?.auth_token_ciphertext).not.toContain(authToken);
+    const verifiedResponse = await call("/v1/admin/twilio-connection/verify", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        expected_revision: connection.revision, advanced_opt_out_status: "enabled",
+      }),
+    });
+    expect(verifiedResponse.status).toBe(200);
+    expect(await verifiedResponse.json()).toMatchObject({ connection: {
+      status: "active", advanced_opt_out_status: "enabled", revision: 2,
+    } });
+    expect(providerFetch).toHaveBeenCalledTimes(2);
+
+    const consentResponse = await call(`/v1/admin/contacts/${contactId}/sms-consent`, {
+      method: "PUT", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({
+        status: "opted_in", basis: "express", evidence: "Website SMS checkbox v3",
+        captured_at: new Date(Date.now() - 60_000).toISOString(), if_revision: 0,
+      }),
+    });
+    expect(consentResponse.status).toBe(200);
+    expect(await consentResponse.json()).toMatchObject({ consent: { status: "opted_in", basis: "express", revision: 1 } });
+    const sendBody = {
+      contact_id: contactId, template: "Hi {{contact.first_name}} — {{contact.custom.service_plan}} support: {{custom_values.support_phone}}",
+      purpose: "marketing", idempotency_key: "twilio-send-1", confirmation: "SEND SMS",
+    };
+    const sentResponse = await call("/v1/admin/sms/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
+    });
+    expect(sentResponse.status).toBe(201);
+    const sent = await sentResponse.json() as { message: { id: string; thread_id: string; status: string; body_text: string } };
+    expect(sent.message).toMatchObject({ status: "queued", body_text: "Hi SMS — Growth support: +15551238888" });
+    expect(providerFetch).toHaveBeenCalledTimes(3);
+    expect((await call("/v1/admin/sms/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify(sendBody),
+    })).status).toBe(200);
+    expect(providerFetch).toHaveBeenCalledTimes(3);
+
+    const statusUrl = `${base}/v1/hooks/twilio/status/${connection.id}`;
+    const statusBody = new URLSearchParams({ AccountSid: accountSid, MessageSid: outboundSid,
+      MessageStatus: "delivered", ErrorCode: "" }).toString();
+    const statusResponse = await call(`/v1/hooks/twilio/status/${connection.id}`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": await signTwilio(authToken, statusUrl, statusBody) }, body: statusBody,
+    });
+    expect(statusResponse.status).toBe(200);
+    expect((await env.DB.prepare("SELECT status FROM sms_messages WHERE id=?").bind(sent.message.id)
+      .first<{ status: string }>())?.status).toBe("delivered");
+    expect((await call(`/v1/hooks/twilio/status/${connection.id}`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": "invalid" }, body: statusBody,
+    })).status).toBe(403);
+
+    const inboundUrl = `${base}/v1/hooks/twilio/inbound/${connection.id}`;
+    const inboundBody = new URLSearchParams({ AccountSid: accountSid, MessagingServiceSid: serviceSid,
+      MessageSid: inboundSid, From: "+15551230001", To: "+15551230000", Body: "STOP", OptOutType: "STOP" }).toString();
+    const inboundResponse = await call(`/v1/hooks/twilio/inbound/${connection.id}`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": await signTwilio(authToken, inboundUrl, inboundBody) }, body: inboundBody,
+    });
+    expect(inboundResponse.status).toBe(200);
+    expect(await inboundResponse.text()).toBe("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>");
+    expect(await env.DB.prepare("SELECT status,basis,provider_opt_out_type FROM sms_consents WHERE contact_id=?")
+      .bind(contactId).first()).toEqual({ status: "opted_out", basis: "provider_stop", provider_opt_out_type: "STOP" });
+    expect((await call("/v1/admin/sms/send", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ ...sendBody, idempotency_key: "twilio-after-stop-1" }),
+    })).status).toBe(422);
+    expect(providerFetch).toHaveBeenCalledTimes(3);
+    const thread = await call(`/v1/admin/sms/threads/${sent.message.thread_id}`, { headers: adminHeaders })
+      .then((response) => response.json()) as { messages: Array<{ direction: string; opt_out_type: string | null }> };
+    expect(thread.messages).toEqual([
+      expect.objectContaining({ direction: "outbound" }),
+      expect.objectContaining({ direction: "inbound", opt_out_type: "STOP" }),
+    ]);
+    providerFetch.mockRestore();
   });
 
   it("persists consent-governed email conversations with replay-safe delivery and thread lifecycle", async () => {
@@ -1768,7 +1922,7 @@ describe("workspace member contact permissions", () => {
     const ownerResponse = await call("/v1/admin/access-policy", { headers: adminHeaders });
     expect(ownerResponse.status).toBe(200);
     const owner = await ownerResponse.json() as {
-      policy: { revision: number; editable: boolean; grants: string[]; invariants: Record<string, string> };
+      policy: { revision: number; editable: boolean; grants: string[]; allowed_grants: string[]; invariants: Record<string, string> };
       members: Array<{ email: string; role: string }>;
     };
     expect(owner.policy).toEqual(expect.objectContaining({
@@ -1779,6 +1933,7 @@ describe("workspace member contact permissions", () => {
         "update_field:next_follow_up_at", "update_field:owner", "update_field:stage", "update_field:status",
       ],
     }));
+    expect(owner.policy.allowed_grants).toContain("update_field:phone");
     expect(owner.policy.invariants).toEqual(expect.objectContaining({
       members: "deny_unlisted_writes",
       agents: "separate_scoped_credentials",
@@ -1837,6 +1992,14 @@ describe("workspace member contact permissions", () => {
     }));
     expect((await env.DB.prepare("SELECT owner FROM contacts WHERE id=?").bind(contactId)
       .first<{ owner: string | null }>())?.owner).toBeNull();
+    const deniedPhone = await call(`/v1/admin/contacts/${contactId}`, {
+      method: "PATCH", headers: { ...memberHeaders, ...jsonHeaders },
+      body: JSON.stringify({ phone: "+15551234567", if_updated_at: before?.updated_at }),
+    });
+    expect(deniedPhone.status).toBe(403);
+    expect(await deniedPhone.json()).toEqual(expect.objectContaining({
+      code: "permission_denied", capability: "contact.update_field:phone",
+    }));
 
     const allowedStage = await call(`/v1/admin/contacts/${contactId}`, {
       method: "PATCH", headers: { ...memberHeaders, ...jsonHeaders },
@@ -5594,6 +5757,7 @@ describe("OpenClaw and Hermes MCP boundary", () => {
       { scopes: ["crm:companies:read"], tools: ["crm_list_companies", "crm_get_company", "crm_describe_company_fields"] },
       { scopes: ["crm:opportunities:read"], tools: ["crm_list_opportunities", "crm_get_opportunity", "crm_describe_opportunity_fields"] },
       { scopes: ["crm:automations:read"], tools: ["crm_list_workflows", "crm_list_workflow_runs"] },
+      { scopes: ["crm:custom-values:read"], tools: ["crm_list_custom_values"] },
       { scopes: ["crm:visitor-intent:read"], tools: [
         "crm_list_visitor_intent", "crm_list_visitor_intent_accounts", "crm_list_visitor_intent_cases",
       ] },
@@ -5629,9 +5793,39 @@ describe("OpenClaw and Hermes MCP boundary", () => {
     };
     expect(legacyTools.result.tools.map((tool) => tool.name).sort()).toEqual([
       "crm_describe_company_fields", "crm_describe_contact_fields", "crm_describe_opportunity_fields",
-      "crm_get_briefing", "crm_get_company", "crm_get_contact", "crm_get_opportunity", "crm_list_companies", "crm_list_opportunities",
-      "crm_list_workflow_runs", "crm_list_workflows", "crm_search_contacts",
+      "crm_get_briefing", "crm_get_company", "crm_get_contact", "crm_get_opportunity", "crm_list_companies", "crm_list_custom_values",
+      "crm_list_opportunities", "crm_list_workflow_runs", "crm_list_workflows", "crm_search_contacts",
     ]);
+  });
+
+  it("exposes active workspace custom values only through their dedicated MCP scope", async () => {
+    const created = await call("/v1/admin/custom-values", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ value_key: "company_phone", label: "Company phone", value: "+15551234567", folder: "Company" }),
+    }).then((response) => response.json()) as { value: { id: string; revision: number } };
+    const credential = await createAgentCredential(["crm:custom-values:read"], 60, "openclaw");
+    const result = await mcp(credential.api_key, "tools/call", {
+      name: "crm_list_custom_values", arguments: {},
+    }).then((response) => response.json()) as {
+      result: { structuredContent: { values: Array<Record<string, unknown>> } };
+    };
+    expect(result.result.structuredContent.values).toEqual([
+      expect.objectContaining({
+        value_key: "company_phone", label: "Company phone", value: "+15551234567",
+        token: "{{custom_values.company_phone}}",
+      }),
+    ]);
+    expect(JSON.stringify(result)).toContain("not instructions");
+    expect((await call(`/v1/admin/custom-values/${created.value.id}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ active: false, if_revision: created.value.revision }),
+    })).status).toBe(200);
+    const archived = await mcp(credential.api_key, "tools/call", {
+      name: "crm_list_custom_values", arguments: {},
+    }).then((response) => response.json()) as {
+      result: { structuredContent: { values: Array<Record<string, unknown>> } };
+    };
+    expect(archived.result.structuredContent.values).toEqual([]);
   });
 
   it("[extended] lets agents observe workflows and propose one human-gated manual launch without borrowing authority", async () => {
@@ -6780,9 +6974,13 @@ describe("validation and operator workflows", () => {
 
     const created = await ingest(source.api_key, { contact: { email: "operator@example.com" } });
     const contactId = (await created.json() as { contact: { id: string } }).contact.id;
+    expect((await call(`/v1/admin/contacts/${contactId}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ phone: "555-not-e164" }),
+    })).status).toBe(400);
     const updated = await call(`/v1/admin/contacts/${contactId}`, {
       method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
-      body: JSON.stringify({ stage: "booked", next_follow_up_at: "2026-07-30T12:00:00Z" }),
+      body: JSON.stringify({ stage: "booked", phone: "+15551234567", next_follow_up_at: "2026-07-30T12:00:00Z" }),
     });
     expect(updated.status).toBe(200);
     const noted = await call(`/v1/admin/contacts/${contactId}/notes`, {
@@ -6791,8 +6989,9 @@ describe("validation and operator workflows", () => {
     });
     expect(noted.status).toBe(201);
     const detail = await call(`/v1/admin/contacts/${contactId}`, { headers: adminHeaders });
-    const detailJson = await detail.json() as { contact: { stage: string }; notes: unknown[] };
+    const detailJson = await detail.json() as { contact: { stage: string; phone: string }; notes: unknown[] };
     expect(detailJson.contact.stage).toBe("booked");
+    expect(detailJson.contact.phone).toBe("+15551234567");
     expect(detailJson.notes).toHaveLength(1);
 
     const sourceRow = await env.DB.prepare("SELECT id FROM sources WHERE slug=?").bind(source.slug).first<{ id: string }>();
@@ -8871,11 +9070,17 @@ describe("workspace isolation and agentic CRM", () => {
     expect((await env.DB.prepare("SELECT COUNT(*) total FROM notes WHERE contact_id='con_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'")
       .first<{ total: number }>())?.total).toBe(1);
 
+    const customValueResponse = await call("/v1/admin/custom-values", {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ value_key: "booking_link", label: "Booking link", value: "https://example.com/book" }),
+    });
+    expect(customValueResponse.status).toBe(201);
+    const customValue = (await customValueResponse.json() as { value: { id: string; revision: number } }).value;
     const templateCreate = await call("/v1/admin/automations", {
       method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
       body: JSON.stringify({
         name: "Governed merge variable", trigger_type: "contact.manual", conditions: [],
-        actions: [{ type: "add_note", body: "Seats: {{contact.custom.automation_seats}}" }],
+        actions: [{ type: "add_note", body: "Seats: {{contact.custom.automation_seats}} — Book: {{custom_values.booking_link}}" }],
       }),
     });
     expect(templateCreate.status, JSON.stringify(await templateCreate.clone().json())).toBe(201);
@@ -8883,7 +9088,7 @@ describe("workspace isolation and agentic CRM", () => {
     const templateDraft = await env.DB.prepare("SELECT updated_at,authority_manifest FROM automation_rules WHERE id=?")
       .bind(templateWorkflow.id).first<{ updated_at: string; authority_manifest: string }>();
     expect(JSON.parse(templateDraft?.authority_manifest || "[]")).toEqual([
-      "custom_field.read:contact:automation_seats", "note.create",
+      "custom_field.read:contact:automation_seats", "custom_value.read:booking_link", "note.create",
     ]);
     expect((await call(`/v1/admin/automations/${templateWorkflow.id}`, {
       method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
@@ -8895,8 +9100,8 @@ describe("workspace isolation and agentic CRM", () => {
     })).status).toBe(200);
     expect(await env.DB.prepare(`SELECT body FROM notes
       WHERE contact_id='con_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' ORDER BY created_at DESC LIMIT 1`).first())
-      .toEqual({ body: "Seats: 42" });
-    for (const body of ["{{contact.custom.missing_field}}", "{{opportunity.custom.automation_seats}}"]) {
+      .toEqual({ body: "Seats: 42 — Book: https://example.com/book" });
+    for (const body of ["{{contact.custom.missing_field}}", "{{opportunity.custom.automation_seats}}", "{{custom_values.missing_value}}"]) {
       expect((await call("/v1/admin/automations", {
         method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
         body: JSON.stringify({
@@ -8905,6 +9110,20 @@ describe("workspace isolation and agentic CRM", () => {
         }),
       })).status).toBe(400);
     }
+    expect((await call(`/v1/admin/custom-values/${customValue.id}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ active: false, if_revision: customValue.revision }),
+    })).status).toBe(200);
+    const customValueDriftRun = await call(`/v1/admin/automations/${templateWorkflow.id}/run`, {
+      method: "POST", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ record_id: "con_ffffffffffffffffffffffffffffffff" }),
+    });
+    expect(customValueDriftRun.status).toBe(409);
+    expect(await customValueDriftRun.json()).toMatchObject({ code: "workflow_metadata_drift" });
+    expect((await call(`/v1/admin/custom-values/${customValue.id}`, {
+      method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders },
+      body: JSON.stringify({ active: true, if_revision: customValue.revision + 1 }),
+    })).status).toBe(200);
 
     const actionCreate = await call("/v1/admin/automations", {
       method: "POST", headers: { ...adminHeaders, ...jsonHeaders },

@@ -1616,3 +1616,41 @@ test("renders a governed contact-import history with conflict-aware rollback", a
   assert.match(css, /\.lead-view-switcher \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.contacts-panel > \.section-head \{ align-items:stretch; flex-direction:column/);
 });
+
+test("ships governed workspace custom values and a functional Twilio SMS control surface", async () => {
+  const [settings, conversations, dashboard, worker, agentMcp, schema, migration, css] = await Promise.all([
+    readFile(new URL("../app/CrmMessagingSettings.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ConversationsWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/agent-mcp.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0057_crm_custom_values_twilio_sms.sql", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /<CrmMessagingSettings/);
+  assert.match(settings, /Twilio SMS/);
+  assert.match(settings, /VERIFY ACCOUNT \+ SERVICE/);
+  assert.match(settings, /ADVANCED OPT-OUT/);
+  assert.match(settings, /CUSTOM VALUES/);
+  assert.match(settings, /Custom values are member-visible literals/);
+  assert.match(settings, /\/v1\/admin\/twilio-connection\/verify/);
+  assert.match(settings, /\/v1\/admin\/custom-values/);
+  assert.match(conversations, /SEND SMS/);
+  assert.match(conversations, /sms-consent/);
+  assert.match(conversations, /custom_values\./);
+  assert.match(dashboard, /SAVE PHONE/);
+  assert.match(dashboard, /SMS still requires recorded consent/);
+  assert.match(worker, /validTwilioSignature/);
+  assert.match(worker, /sms_consent_required/);
+  assert.match(worker, /OptOutType/);
+  assert.match(worker, /custom_value\.read:\$\{reference\[1\]\}/);
+  assert.match(agentMcp, /crm:custom-values:read/);
+  assert.match(agentMcp, /crm_list_custom_values/);
+  assert.match(schema, /export const crmCustomValues/);
+  assert.match(schema, /export const twilioConnections/);
+  assert.match(migration, /CREATE TABLE `sms_messages`/);
+  assert.match(migration, /CREATE UNIQUE INDEX `sms_messages_workspace_idempotency_unique`/);
+  assert.match(css, /\.crm-messaging-settings/);
+  assert.match(css, /\.conversation-channel-tabs/);
+});

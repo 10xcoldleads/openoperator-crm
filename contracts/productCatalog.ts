@@ -94,6 +94,7 @@ export const automationCatalog = {
       { token: "{{contact.email}}", label: "Lead email", valueType: "text" },
       { token: "{{contact.first_name}}", label: "First name", valueType: "text", nullable: true },
       { token: "{{contact.last_name}}", label: "Last name", valueType: "text", nullable: true },
+      { token: "{{contact.phone}}", label: "Phone", valueType: "text", nullable: true },
       { token: "{{contact.company}}", label: "Company", valueType: "text", nullable: true },
       { token: "{{contact.status}}", label: "Lead status", valueType: "text" },
       { token: "{{contact.stage}}", label: "Lead lifecycle", valueType: "text" },
@@ -105,7 +106,7 @@ export const automationCatalog = {
 } as const;
 
 export type IntegrationCategory =
-  | "mailbox" | "calendar" | "transactional_email" | "community"
+  | "mailbox" | "calendar" | "transactional_email" | "sms" | "community"
   | "visitor_identity" | "agent_runtime" | "developer";
 export type IntegrationAvailability = "implemented" | "planned";
 
@@ -129,6 +130,7 @@ export const integrationCatalog: readonly IntegrationManifest[] = [
   { id: "google-calendar", label: "Google Calendar", category: "calendar", availability: "planned", authStrategy: "oauth", capabilities: ["calendar.events.read", "calendar.availability.read"], requiredBindings: [], setup: "not-implemented", healthCheck: null, executor: null, revoke: null },
   { id: "microsoft-calendar", label: "Microsoft Calendar", category: "calendar", availability: "planned", authStrategy: "oauth", capabilities: ["calendar.events.read", "calendar.availability.read"], requiredBindings: [], setup: "not-implemented", healthCheck: null, executor: null, revoke: null },
   { id: "resend", label: "Resend", category: "transactional_email", availability: "implemented", authStrategy: "api_key", capabilities: ["email.send", "email.delivery.read"], requiredBindings: ["WEBHOOK_ENCRYPTION_KEY"], setup: "resend-api-key", healthCheck: "resend-verification", executor: "resend-email", revoke: "resend-local-revoke" },
+  { id: "twilio", label: "Twilio Messaging", category: "sms", availability: "implemented", authStrategy: "api_key", capabilities: ["sms.send", "sms.receive", "sms.delivery.read", "sms.consent.enforce"], requiredBindings: ["WEBHOOK_ENCRYPTION_KEY"], setup: "twilio-auth-token", healthCheck: "twilio-verification", executor: "twilio-messaging", revoke: "twilio-local-revoke" },
   { id: "skool", label: "Skool", category: "community", availability: "implemented", authStrategy: "api_key", capabilities: ["community.member.ingest", "community.payment.ingest"], requiredBindings: [], setup: "source-credential", healthCheck: "source-last-used", executor: "skool-ingest", revoke: "source-revoke" },
   { id: "audiencelab", label: "AudienceLab", category: "visitor_identity", availability: "implemented", authStrategy: "signed_webhook", capabilities: ["visitor.identify", "audience.import"], requiredBindings: [], setup: "visitor-connector", healthCheck: "connector-last-event", executor: "visitor-intake", revoke: "visitor-connector-revoke" },
   { id: "rb2b", label: "RB2B", category: "visitor_identity", availability: "implemented", authStrategy: "signed_webhook", capabilities: ["visitor.identify"], requiredBindings: [], setup: "visitor-connector", healthCheck: "connector-last-event", executor: "visitor-intake", revoke: "visitor-connector-revoke" },

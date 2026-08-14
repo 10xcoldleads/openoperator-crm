@@ -20,6 +20,7 @@ import type {
 import { parseAutomationTrace } from "./automationTrace";
 import GradientText from "./components/GradientText";
 import ConversationsWorkspace from "./ConversationsWorkspace";
+import CrmMessagingSettings from "./CrmMessagingSettings";
 import FormsWorkspace from "./FormsWorkspace";
 import BookingWorkspace from "./BookingWorkspace";
 import ReportingWorkspace from "./ReportingWorkspace";
@@ -34,7 +35,7 @@ const VisualAutomationBuilder = lazy(() => import("./VisualAutomationBuilder"));
 
 type Contact = {
   id: string; email: string; first_name: string | null; last_name: string | null;
-  company: string | null; stage: string; status: string; source_last: string | null;
+  phone: string | null; company: string | null; stage: string; status: string; source_last: string | null;
   owner: string | null; next_follow_up_at: string | null; last_activity_at: string | null; created_at: string; updated_at: string; revenue: number;
   score: number; custom_fields?: string;
 };
@@ -838,12 +839,12 @@ const agentAccessPresets = {
   assistant: {
     label: "Executive assistant",
     description: "Briefing, records, visitor intent, workflow observability, and human-gated proposals—including manual workflow launches.",
-    scopes: ["crm:summary:read", "crm:companies:read", "crm:contacts:read", "crm:opportunities:read", "crm:automations:read", "crm:visitor-intent:read", "crm:visitor-intent:propose", "crm:visitor-research:execute", "crm:propose"],
+    scopes: ["crm:summary:read", "crm:companies:read", "crm:contacts:read", "crm:opportunities:read", "crm:automations:read", "crm:custom-values:read", "crm:visitor-intent:read", "crm:visitor-intent:propose", "crm:visitor-research:execute", "crm:propose"],
   },
   analyst: {
     label: "Read-only analyst",
     description: "Briefing, companies, contacts, and opportunities. Cannot propose changes.",
-    scopes: ["crm:summary:read", "crm:companies:read", "crm:contacts:read", "crm:opportunities:read"],
+    scopes: ["crm:summary:read", "crm:companies:read", "crm:contacts:read", "crm:opportunities:read", "crm:custom-values:read"],
   },
   contacts: {
     label: "Contact researcher",
@@ -888,6 +889,7 @@ const scopeLabels = (value: string) => {
     "crm:contacts:read": "Contacts",
     "crm:opportunities:read": "Opportunities",
     "crm:automations:read": "Workflow observability",
+    "crm:custom-values:read": "Workspace custom values",
     "crm:visitor-intent:read": "Visitor intent",
     "crm:visitor-intent:propose": "Visitor promotion proposals",
     "crm:visitor-research:execute": "Visitor research jobs",
@@ -1136,9 +1138,11 @@ export default function CrmDashboard() {
   const [bulkOwner, setBulkOwner] = useState("");
   const [bulkReviewOpen, setBulkReviewOpen] = useState(false);
   const [contactOwnerDraft, setContactOwnerDraft] = useState("");
+  const [contactPhoneDraft, setContactPhoneDraft] = useState("");
   const [leadEmail, setLeadEmail] = useState("");
   const [leadFirstName, setLeadFirstName] = useState("");
   const [leadCompany, setLeadCompany] = useState("");
+  const [leadPhone, setLeadPhone] = useState("");
   const [activeView, setActiveView] = useState<WorkspaceView>("dashboard");
   const [taskView, setTaskView] = useState<"list" | "calendar">("list");
   const [calendarMonth, setCalendarMonth] = useState(currentCalendarMonth);
@@ -1919,12 +1923,14 @@ export default function CrmDashboard() {
     }
     setDrawerTab("overview");
     setContactOwnerDraft(contact.owner || "");
+    setContactPhoneDraft(contact.phone || "");
     setSelected(contact);
     setDetail(null);
     const response = await fetch(`/v1/admin/contacts/${contact.id}`, { credentials: "include" });
     if (response.ok) {
       const nextDetail = await response.json() as ContactDetail;
       setDetail(nextDetail);
+      setContactPhoneDraft(nextDetail.contact.phone || "");
       setContactCustomDraft(contactCustomValues(nextDetail.contact.custom_fields));
     }
     else setError("The contact record could not be loaded.");
@@ -1961,6 +1967,7 @@ export default function CrmDashboard() {
     setCompanyDetail(null);
     setDrawerTab("overview");
     setContactOwnerDraft(nextDetail.contact.owner || "");
+    setContactPhoneDraft(nextDetail.contact.phone || "");
     setSelected(nextDetail.contact);
     setDetail(nextDetail);
     setContactCustomDraft(contactCustomValues(nextDetail.contact.custom_fields));
@@ -2310,9 +2317,10 @@ export default function CrmDashboard() {
       body: JSON.stringify({ ...updates, if_updated_at: detail?.contact.updated_at || contact.updated_at }), credentials: "include",
     });
     if (response.ok) {
-      const result = await response.json() as { updated_at: string; custom_fields?: string };
+      const result = await response.json() as { updated_at: string; custom_fields?: string; phone?: string | null };
       const nextContact = {
         ...(detail?.contact || contact), ...updates,
+        ...(Object.hasOwn(result, "phone") ? { phone: result.phone || null } : {}),
         custom_fields: result.custom_fields || detail?.contact.custom_fields || contact.custom_fields,
         updated_at: result.updated_at,
       } as Contact;
@@ -2328,6 +2336,7 @@ export default function CrmDashboard() {
       setContactRows((current) => current.map((item) => item.id === contact.id
         ? { ...item, ...updates, updated_at: result.updated_at } as Contact : item));
       if (Object.hasOwn(updates, "owner")) setContactOwnerDraft(String(updates.owner || ""));
+      if (Object.hasOwn(updates, "phone")) setContactPhoneDraft(String(result.phone || ""));
       setNotice("Contact updated.");
     } else if (response.status === 409) {
       setError("This contact changed in another session. The latest record has been loaded; review it before saving again.");
@@ -2338,6 +2347,7 @@ export default function CrmDashboard() {
         setDetail(latestDetail);
         setSelected(latestDetail.contact);
         setContactOwnerDraft(latestDetail.contact.owner || "");
+        setContactPhoneDraft(latestDetail.contact.phone || "");
         setContactCustomDraft(contactCustomValues(latestDetail.contact.custom_fields));
       }
     }
@@ -3132,11 +3142,11 @@ export default function CrmDashboard() {
     try {
       const response = await fetch("/v1/admin/contacts", {
         method: "POST", headers: { "content-type": "application/json" }, credentials: "include",
-        body: JSON.stringify({ email: leadEmail, first_name: leadFirstName, company: leadCompany }),
+        body: JSON.stringify({ email: leadEmail, first_name: leadFirstName, company: leadCompany, phone: leadPhone || null }),
       });
       const result = await response.json() as { error?: string };
       if (!response.ok) { setError(result.error || "The lead could not be created."); return; }
-      setLeadEmail(""); setLeadFirstName(""); setLeadCompany(""); setLeadComposerOpen(false);
+      setLeadEmail(""); setLeadFirstName(""); setLeadCompany(""); setLeadPhone(""); setLeadComposerOpen(false);
       await Promise.all([load(), loadContacts()]);
       await refreshContactTotals();
       setNotice("Lead created.");
@@ -4930,6 +4940,7 @@ export default function CrmDashboard() {
           <input aria-label="Lead email" type="email" placeholder="lead@company.com" value={leadEmail} onChange={(event) => setLeadEmail(event.target.value)} required maxLength={254} />
           <input aria-label="Lead first name" placeholder="First name" value={leadFirstName} onChange={(event) => setLeadFirstName(event.target.value)} maxLength={100} />
           <input aria-label="Lead company" placeholder="Company" value={leadCompany} onChange={(event) => setLeadCompany(event.target.value)} maxLength={200} />
+          <input aria-label="Lead phone in E.164 format" type="tel" placeholder="+15551234567" value={leadPhone} onChange={(event) => setLeadPhone(event.target.value)} pattern="\+[1-9][0-9]{7,14}" maxLength={16} />
           <button type="submit" disabled={Boolean(mutating)}>{mutating === "lead" ? "ADDING…" : "ADD LEAD"}</button>
         </form>}
         <div className="lead-layout">
@@ -6096,6 +6107,7 @@ export default function CrmDashboard() {
                 {[
                   ["update_field:stage", "Lifecycle stage"],
                   ["update_field:status", "Record status"],
+                  ["update_field:phone", "SMS phone (E.164)"],
                   ["update_field:owner", "Assigned owner"],
                   ["update_field:next_follow_up_at", "Next follow-up"],
                 ].map(([grant, label]) => <button key={grant} type="button"
@@ -6654,6 +6666,7 @@ export default function CrmDashboard() {
             </section>
           </div>
         </section>
+        <CrmMessagingSettings active={activeView === "integrations" && visibleIntegrationDomain === "mailboxes"} canAdmin={canAdmin}/>
         {(control?.role === "owner" || control?.role === "admin") && <section className="agent-access-zone integration-domain" id="integration-agents" role="tabpanel" aria-labelledby="integration-tab-agents" hidden={visibleIntegrationDomain !== "agents"}>
           <div className="section-head"><div><p>OPENCLAW + HERMES</p><h2>Scoped agent access.</h2></div><span>{activeAgentCredentials.length} ACTIVE ACCESS</span></div>
           <div className="agent-traversal-contract"><div><p className="eyebrow">BOUNDED AGENT DISCOVERY</p><h3>Agents can continue safely beyond the first page.</h3><small>Contacts, companies, opportunities, workflows, and workflow runs return at most 50 records per call with opaque continuation cursors. Cursors are signed, workspace- and credential-bound, and rejected when filters change.</small></div>
@@ -7250,6 +7263,9 @@ export default function CrmDashboard() {
             <option value="lead">Lead</option><option value="customer">Customer</option><option value="inactive">Inactive</option>
           </select></label>
         </div>
+        <label htmlFor="contact-phone">PHONE <small>/ E.164 FOR SMS</small></label>
+        <div className="owner-editor"><input id="contact-phone" type="tel" inputMode="tel" maxLength={16} placeholder="+15551234567" disabled={Boolean(mutating)} value={contactPhoneDraft} onChange={(event) => setContactPhoneDraft(event.target.value)} aria-describedby="contact-phone-help" aria-invalid={Boolean(contactPhoneDraft.trim()) && !/^\+[1-9][0-9]{7,14}$/.test(contactPhoneDraft.trim())} /><button type="button" disabled={Boolean(mutating) || contactPhoneDraft.trim() === (detail?.contact.phone || selected.phone || "") || (Boolean(contactPhoneDraft.trim()) && !/^\+[1-9][0-9]{7,14}$/.test(contactPhoneDraft.trim()))} onClick={() => void updateContact(selected, { phone: contactPhoneDraft.trim() || null })}>SAVE PHONE</button></div>
+        <small id="contact-phone-help">Use country code format, for example +15551234567. SMS still requires recorded consent.</small>
         <label htmlFor="contact-owner">OWNER</label><div className="owner-editor"><input id="contact-owner" type="email" maxLength={254} placeholder="owner@company.com" disabled={Boolean(mutating)} value={contactOwnerDraft} onChange={(event) => setContactOwnerDraft(event.target.value)} /><button type="button" disabled={Boolean(mutating) || contactOwnerDraft.trim() === (detail?.contact.owner || selected.owner || "")} onClick={() => void updateContact(selected, { owner: contactOwnerDraft.trim() || null })}>SAVE OWNER</button></div>
         <label htmlFor="follow-up">NEXT FOLLOW-UP</label><input id="follow-up" disabled={Boolean(mutating)} type="datetime-local" value={detail?.contact.next_follow_up_at?.slice(0,16) || ""} onChange={(event) => void updateContact(selected, { next_follow_up_at: event.target.value ? new Date(event.target.value).toISOString() : null })} />
         {customFields.some((field) => field.object_type === "contact" && field.active) && <section className="record-custom-fields" aria-labelledby="record-custom-fields-title">

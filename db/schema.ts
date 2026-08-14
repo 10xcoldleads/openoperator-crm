@@ -468,6 +468,86 @@ export const communicationConsents = sqliteTable("communication_consents", {
   index("communication_consents_workspace_status_idx").on(table.workspaceId, table.channel, table.status),
 ]);
 
+export const crmCustomValues = sqliteTable("crm_custom_values", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  valueKey: text("value_key").notNull(), label: text("label").notNull(), value: text("value").notNull(),
+  folder: text("folder"), active: integer("active", { mode: "boolean" }).notNull().default(true),
+  revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(),
+  createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("crm_custom_values_workspace_key_unique").on(table.workspaceId, table.valueKey),
+  index("crm_custom_values_workspace_folder_idx").on(table.workspaceId, table.active, table.folder, table.label),
+]);
+
+export const twilioConnections = sqliteTable("twilio_connections", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  label: text("label").notNull(), accountSid: text("account_sid").notNull(), authTokenPrefix: text("auth_token_prefix").notNull(),
+  authTokenCiphertext: text("auth_token_ciphertext").notNull(), messagingServiceSid: text("messaging_service_sid").notNull(),
+  status: text("status", { enum: ["pending", "active", "error", "revoked"] }).notNull().default("pending"),
+  advancedOptOutStatus: text("advanced_opt_out_status", { enum: ["unverified", "enabled", "disabled"] }).notNull().default("unverified"),
+  lastVerifiedAt: text("last_verified_at"), lastError: text("last_error"), revision: integer("revision").notNull().default(1),
+  changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("twilio_connections_workspace_active_unique").on(table.workspaceId).where(sql`${table.status} <> 'revoked'`),
+  index("twilio_connections_workspace_status_idx").on(table.workspaceId, table.status),
+]);
+
+export const smsConsents = sqliteTable("sms_consents", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "cascade" }),
+  status: text("status", { enum: ["unknown", "opted_in", "opted_out"] }).notNull().default("unknown"),
+  basis: text("basis", { enum: ["unknown", "express", "contractual", "inbound_request", "manual_suppression", "provider_stop"] }).notNull().default("unknown"),
+  evidence: text("evidence"), capturedAt: text("captured_at"), providerOptOutType: text("provider_opt_out_type", { enum: ["STOP", "START", "HELP"] }),
+  revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(), createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("sms_consents_contact_unique").on(table.workspaceId, table.contactId),
+  index("sms_consents_workspace_status_idx").on(table.workspaceId, table.status),
+]);
+
+export const smsThreads = sqliteTable("sms_threads", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  connectionId: text("connection_id").notNull().references(() => twilioConnections.id, { onDelete: "restrict" }),
+  contactId: text("contact_id").references(() => contacts.id, { onDelete: "set null" }), participantPhone: text("participant_phone").notNull(),
+  status: text("status", { enum: ["open", "closed", "quarantined"] }).notNull().default("open"),
+  lastMessageAt: text("last_message_at").notNull(), unreadCount: integer("unread_count").notNull().default(0),
+  revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("sms_threads_workspace_phone_unique").on(table.workspaceId, table.participantPhone),
+  index("sms_threads_workspace_recent_idx").on(table.workspaceId, table.lastMessageAt, table.id),
+  index("sms_threads_workspace_contact_idx").on(table.workspaceId, table.contactId, table.lastMessageAt),
+]);
+
+export const smsMessages = sqliteTable("sms_messages", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  connectionId: text("connection_id").notNull().references(() => twilioConnections.id, { onDelete: "restrict" }),
+  threadId: text("thread_id").notNull().references(() => smsThreads.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").references(() => contacts.id, { onDelete: "set null" }), direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
+  providerMessageSid: text("provider_message_sid"), idempotencyKey: text("idempotency_key").notNull(), requestHash: text("request_hash").notNull(),
+  fromPhone: text("from_phone").notNull(), toPhone: text("to_phone").notNull(), bodyTemplate: text("body_template"), bodyText: text("body_text").notNull(),
+  purpose: text("purpose", { enum: ["inbound", "transactional", "marketing"] }).notNull(),
+  status: text("status", { enum: ["received", "pending", "accepted", "queued", "sending", "sent", "delivered", "undelivered", "failed", "unknown"] }).notNull(),
+  errorCode: text("error_code"), error: text("error"), optOutType: text("opt_out_type", { enum: ["STOP", "START", "HELP"] }),
+  providerStatusAt: text("provider_status_at"), sentBy: text("sent_by"), occurredAt: text("occurred_at").notNull(),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("sms_messages_workspace_idempotency_unique").on(table.workspaceId, table.idempotencyKey),
+  uniqueIndex("sms_messages_workspace_provider_unique").on(table.workspaceId, table.providerMessageSid),
+  index("sms_messages_thread_occurred_idx").on(table.workspaceId, table.threadId, table.occurredAt, table.id),
+  index("sms_messages_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt, table.id),
+]);
+
+export const twilioWebhookReceipts = sqliteTable("twilio_webhook_receipts", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  connectionId: text("connection_id").notNull().references(() => twilioConnections.id, { onDelete: "cascade" }),
+  eventType: text("event_type", { enum: ["inbound", "status"] }).notNull(), requestHash: text("request_hash").notNull(),
+  signatureHash: text("signature_hash").notNull(), providerMessageSid: text("provider_message_sid"), processedAt: text("processed_at").notNull(),
+}, (table) => [
+  uniqueIndex("twilio_webhook_receipts_connection_request_unique").on(table.connectionId, table.requestHash),
+  index("twilio_webhook_receipts_workspace_processed_idx").on(table.workspaceId, table.processedAt, table.id),
+]);
+
 export const marketingCampaigns = sqliteTable("marketing_campaigns", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   name: text("name").notNull(), status: text("status", { enum: ["draft", "ready", "sending", "completed", "cancelled"] }).notNull().default("draft"),
