@@ -7,13 +7,13 @@ This project is an independent open-source implementation. It is not affiliated 
 ## What works
 
 - Multi-workspace membership and role enforcement
-- Contacts, companies, deduplication, custom fields, saved views, imports, notes, and activity history
-- Consent-aware email conversations with persisted threads, explicit mailbox sync, suppression, and replay-safe Resend delivery
+- Contacts, companies, deduplication, E.164 SMS phone maintenance, typed custom fields, reusable workspace custom values, saved views, imports, notes, and activity history
+- Unified consent-aware email/SMS conversations with persisted threads, explicit mailbox sync, replay-safe Resend delivery, and encrypted verified Twilio Messaging Service integration
 - Versioned public forms with consent evidence, replay-safe submissions, publish/revoke lifecycle, and a CRM submission ledger
 - Configurable pipelines, stages, opportunities, forecasting, and optimistic updates
 - Tasks with contact/opportunity relationships and lifecycle controls
-- Visual event-driven automations with conditions, MATCH/ELSE branches, typed variables, run caps, traces, retries, and cancellation
-- Human-gated agent proposals plus scoped OpenClaw/Hermes-compatible work queues
+- Visual event-driven automations with conditions, MATCH/ELSE branches, typed record variables, governed workspace merge values, run caps, traces, retries, and cancellation
+- Human-gated agent proposals plus scoped OpenClaw/Hermes-compatible work queues and least-privilege read tools for CRM metadata/custom values
 - Source credentials, signed inbound/outbound webhooks, replay protection, retries, health evidence, and audit-atomic mutations
 - Encrypted recovery archives and workspace restore validation
 - Optional transactional email, mailbox metadata previews, PagerDuty, and external integrations when operators provide credentials
@@ -21,7 +21,7 @@ This project is an independent open-source implementation. It is not affiliated 
 
 ## Intentionally not claimed
 
-The repository does not pretend to include a production telephony carrier, payment processor, social network publisher, full website builder, review network, or autonomous unrestricted AI. Those capabilities require third-party accounts and compliance work. The integration boundaries are documented so operators can add them without weakening the core system.
+The repository does not pretend to include number purchasing, A2P registration, voice, MMS, WhatsApp, a payment processor, social network publisher, review network, or autonomous unrestricted AI. Twilio SMS is optional and works only with operator-owned credentials, a verified Messaging Service, current contact permission, and correct Twilio Console compliance configuration.
 
 ## Architecture
 

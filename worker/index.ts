@@ -97,6 +97,7 @@ function usesIndependentCredential(pathname: string): boolean {
     /^\/v1\/public\/booking\/[a-z0-9][a-z0-9-]{2,79}(?:\/appointments)?$/.test(pathname) ||
     pathname === "/v1/public/appointments/manage" ||
     /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(pathname) ||
+    /^\/v1\/hooks\/twilio\/(?:inbound|status)\/twc_[a-f0-9]{32}$/.test(pathname) ||
     /^\/v1\/hooks\/[^/]+$/.test(pathname);
 }
 type Json = Record<string, unknown>;
@@ -122,15 +123,15 @@ const workerCatalogHandlers = {
   ]),
   integrationExecutors: new Set([
     "composio", "skool-ingest", "visitor-intake", "agent-mcp",
-    "webhook-ingest", "webhook-delivery", "resend-email",
+    "webhook-ingest", "webhook-delivery", "resend-email", "twilio-messaging",
   ]),
   integrationHealthChecks: new Set([
     "composio-account", "source-last-used", "connector-last-event",
-    "agent-run-observed", "delivery-history", "resend-verification",
+    "agent-run-observed", "delivery-history", "resend-verification", "twilio-verification",
   ]),
   integrationRevokers: new Set([
     "composio-revoke", "source-revoke", "visitor-connector-revoke",
-    "agent-credential-revoke", "webhook-delete", "resend-local-revoke",
+    "agent-credential-revoke", "webhook-delete", "resend-local-revoke", "twilio-local-revoke",
   ]),
 };
 
@@ -233,16 +234,16 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 33;
+const RECOVERY_SCHEMA_VERSION = 34;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
-  | "custom_field_definitions"
+  | "custom_field_definitions" | "crm_custom_values"
   | "object_page_layouts"
   | "custom_object_definitions" | "custom_object_views" | "custom_object_records" | "custom_object_relations"
   | "saved_views" | "opportunities" | "tasks" | "automation_rules" | "automation_runs"
   | "visitor_connectors" | "audience_imports" | "visitor_profiles" | "audience_import_members"
   | "visitor_events" | "visitor_intent_cases" | "mailbox_connections"
-  | "communication_consents" | "conversation_threads" | "conversation_messages"
+  | "communication_consents" | "sms_consents" | "conversation_threads" | "conversation_messages"
   | "forms" | "form_versions" | "form_submissions"
   | "surveys" | "survey_versions" | "survey_responses"
   | "sites" | "site_versions"
@@ -259,6 +260,7 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   company_redirects: { columns: ["id", "workspace_id", "source_company_id", "target_company_id", "source_name", "merged_at"] },
   contacts: { columns: ["id", "workspace_id", "email", "first_name", "last_name", "phone", "company", "company_id", "status", "stage", "score", "owner", "source_first", "source_last", "tags", "custom_fields", "last_activity_at", "next_follow_up_at", "created_at", "updated_at"] },
   custom_field_definitions: { columns: ["id", "workspace_id", "object_type", "field_key", "label", "field_type", "options", "required", "active", "position", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  crm_custom_values: { columns: ["id", "workspace_id", "value_key", "label", "value", "folder", "active", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   object_page_layouts: { columns: ["id", "workspace_id", "object_type", "name", "sections", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   custom_object_definitions: { columns: ["id", "workspace_id", "slug", "singular_label", "plural_label", "description", "fields", "active", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   custom_object_views: { columns: ["id", "workspace_id", "object_id", "name", "visibility", "filters", "visible_fields", "sort_field", "sort_direction", "revision", "change_id", "created_by", "created_at", "updated_at"] },
@@ -281,6 +283,7 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   visitor_intent_cases: { columns: ["id", "workspace_id", "company_domain", "company_name", "status", "priority", "owner", "due_at", "evidence_updated_at", "intent_score", "evidence_snapshot", "resolution_note", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   mailbox_connections: { columns: ["id", "workspace_id", "owner_email", "provider", "toolkit", "alias", "auth_config_id", "composio_user_id", "connected_account_id", "status", "provider_status", "allowed_capabilities", "last_synced_at", "last_error", "revision", "change_id", "connect_expires_at", "created_by", "created_at", "updated_at"] },
   communication_consents: { columns: ["id", "workspace_id", "contact_id", "channel", "status", "basis", "evidence", "captured_at", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  sms_consents: { columns: ["id", "workspace_id", "contact_id", "status", "basis", "evidence", "captured_at", "provider_opt_out_type", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   conversation_threads: { columns: ["id", "workspace_id", "contact_id", "channel", "provider", "provider_thread_id", "participant_email", "subject", "status", "last_message_at", "unread_count", "revision", "change_id", "created_at", "updated_at"] },
   conversation_messages: { columns: ["id", "workspace_id", "thread_id", "direction", "provider", "provider_message_id", "idempotency_key", "from_email", "to_email", "subject", "body_text", "purpose", "status", "error", "sent_by", "occurred_at", "created_at", "updated_at"] },
   forms: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "fields", "consent_text", "success_message", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
@@ -1483,6 +1486,7 @@ function safeCommunicationConsent(row: Record<string, unknown> | null) {
 function safeConversationThread(row: Record<string, unknown>) {
   return {
     id: row.id, contact_id: row.contact_id, channel: row.channel, participant_email: row.participant_email,
+    participant_phone: null,
     subject: row.subject, status: row.status, last_message_at: row.last_message_at,
     unread_count: row.unread_count, revision: row.revision, contact_name: row.contact_name || null,
     consent: safeCommunicationConsent(row.consent_id ? {
@@ -1497,7 +1501,8 @@ function safeConversationMessage(row: Record<string, unknown>) {
     id: row.id, thread_id: row.thread_id, direction: row.direction, provider: row.provider,
     from_email: row.from_email, to_email: row.to_email, subject: row.subject, body_text: row.body_text,
     purpose: row.purpose, status: row.status, error: row.error, sent_by: row.sent_by,
-    occurred_at: row.occurred_at,
+    from_phone: null, to_phone: null, provider_message_sid: null, opt_out_type: null,
+    occurred_at: row.occurred_at, updated_at: row.updated_at,
   };
 }
 function resendErrorPayload(value: unknown, fallback: string) {
@@ -1646,6 +1651,181 @@ async function executeResendDelivery(
     .bind(delivery.id, access.workspaceId).first();
   return json({ ok: true, replayed: false, delivery: safeResendDelivery(completed as Record<string, unknown> | null) }, 201);
 }
+
+function normalizeE164(value: unknown) {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim().replace(/[\s().-]/g, "");
+  return /^\+[1-9][0-9]{7,14}$/.test(normalized) ? normalized : "";
+}
+function safeTwilioConnection(row: Record<string, unknown> | null, origin = "") {
+  if (!row) return null;
+  const base = origin.replace(/\/$/, "");
+  return {
+    id: row.id, label: row.label, account_sid: row.account_sid, auth_token_prefix: row.auth_token_prefix,
+    messaging_service_sid: row.messaging_service_sid, status: row.status,
+    advanced_opt_out_status: row.advanced_opt_out_status, last_verified_at: row.last_verified_at,
+    last_error: row.last_error, revision: row.revision, change_id: row.change_id,
+    created_at: row.created_at, updated_at: row.updated_at,
+    inbound_webhook_url: base ? `${base}/v1/hooks/twilio/inbound/${String(row.id)}` : null,
+    status_callback_url: base ? `${base}/v1/hooks/twilio/status/${String(row.id)}` : null,
+  };
+}
+function safeSmsConsent(row: Record<string, unknown> | null) {
+  if (!row) return { channel: "sms", status: "unknown", basis: "unknown", evidence: null,
+    captured_at: null, provider_opt_out_type: null, revision: 0, updated_at: null };
+  return {
+    id: row.id, contact_id: row.contact_id, channel: "sms", status: row.status, basis: row.basis,
+    evidence: row.evidence, captured_at: row.captured_at, provider_opt_out_type: row.provider_opt_out_type,
+    revision: row.revision, updated_at: row.updated_at,
+  };
+}
+function safeSmsThread(row: Record<string, unknown>) {
+  return {
+    id: row.id, contact_id: row.contact_id, channel: "sms", participant_phone: row.participant_phone,
+    participant_email: null, subject: "SMS conversation",
+    status: row.status, last_message_at: row.last_message_at, unread_count: row.unread_count,
+    revision: row.revision, contact_name: row.contact_name || null,
+    consent: safeSmsConsent(row.consent_id ? {
+      id: row.consent_id, contact_id: row.contact_id, status: row.consent_status, basis: row.consent_basis,
+      evidence: row.consent_evidence, captured_at: row.consent_captured_at,
+      provider_opt_out_type: row.consent_provider_opt_out_type, revision: row.consent_revision,
+      updated_at: row.consent_updated_at,
+    } : null),
+  };
+}
+function safeSmsMessage(row: Record<string, unknown>) {
+  return {
+    id: row.id, thread_id: row.thread_id, contact_id: row.contact_id, direction: row.direction,
+    provider: "twilio", provider_message_sid: row.provider_message_sid,
+    from_phone: row.from_phone, to_phone: row.to_phone, body_template: row.body_template,
+    body_text: row.body_text, purpose: row.purpose, status: row.status,
+    error_code: row.error_code, error: row.error, opt_out_type: row.opt_out_type,
+    sent_by: row.sent_by, occurred_at: row.occurred_at, updated_at: row.updated_at,
+  };
+}
+function twilioError(value: unknown, fallback: string) {
+  if (!isPlainObject(value)) return fallback;
+  const message = typeof value.message === "string" ? value.message.trim() : "";
+  const code = typeof value.code === "number" || typeof value.code === "string" ? String(value.code) : "";
+  return `${code ? `Twilio ${code}: ` : ""}${message || fallback}`.slice(0, 300);
+}
+async function twilioAuthToken(env: FrameworkEnv, connection: Record<string, unknown>) {
+  return decryptWorkspaceSecret(env, String(connection.workspace_id), "twilio", String(connection.id),
+    String(connection.auth_token_ciphertext));
+}
+async function twilioProviderRequest(env: FrameworkEnv, connection: Record<string, unknown>, url: string, init: RequestInit = {}) {
+  const token = await twilioAuthToken(env, connection);
+  return fetch(url, {
+    ...init, redirect: "manual", signal: AbortSignal.timeout(8_000),
+    headers: {
+      authorization: `Basic ${btoa(`${String(connection.account_sid)}:${token}`)}`,
+      "user-agent": "OpenOperator-CRM/1.0",
+      ...(init.headers || {}),
+    },
+  });
+}
+async function verifyTwilioConnection(env: FrameworkEnv, connection: Record<string, unknown>) {
+  const accountSid = String(connection.account_sid);
+  const serviceSid = String(connection.messaging_service_sid);
+  const [accountResponse, serviceResponse] = await Promise.all([
+    twilioProviderRequest(env, connection, `https://api.twilio.com/2010-04-01/Accounts/${accountSid}.json`),
+    twilioProviderRequest(env, connection, `https://messaging.twilio.com/v1/Services/${serviceSid}`),
+  ]);
+  const accountText = (await accountResponse.text()).slice(0, 8192);
+  const serviceText = (await serviceResponse.text()).slice(0, 8192);
+  let account: unknown = null; let service: unknown = null;
+  try { account = accountText ? JSON.parse(accountText) : null; } catch {}
+  try { service = serviceText ? JSON.parse(serviceText) : null; } catch {}
+  if (!accountResponse.ok) return { ok: false as const, error: twilioError(account, `Account verification returned HTTP ${accountResponse.status}`) };
+  if (!serviceResponse.ok) return { ok: false as const, error: twilioError(service, `Messaging Service verification returned HTTP ${serviceResponse.status}`) };
+  if (!isPlainObject(account) || String(account.sid || "") !== accountSid || !isPlainObject(service) ||
+    String(service.sid || "") !== serviceSid || String(service.account_sid || service.accountSid || "") !== accountSid) {
+    return { ok: false as const, error: "Twilio returned account or Messaging Service data that did not match this connection" };
+  }
+  return { ok: true as const, service: {
+    friendly_name: typeof service.friendly_name === "string" ? service.friendly_name : null,
+    inbound_request_url: typeof service.inbound_request_url === "string" ? service.inbound_request_url : null,
+    use_inbound_webhook_on_number: Boolean(service.use_inbound_webhook_on_number),
+  } };
+}
+async function resolveContactTemplate(env: FrameworkEnv, workspaceId: string, contact: Record<string, unknown>,
+  template: string, maxLength: number) {
+  const [definitions, customValues] = await Promise.all([
+    env.DB.prepare(`SELECT field_key FROM custom_field_definitions
+      WHERE workspace_id=? AND object_type='contact' AND active=1`).bind(workspaceId).all<{ field_key: string }>(),
+    env.DB.prepare(`SELECT value_key,value FROM crm_custom_values WHERE workspace_id=? AND active=1`)
+      .bind(workspaceId).all<{ value_key: string; value: string }>(),
+  ]);
+  const allowedCustomFields = new Set(definitions.results.map((item) => item.field_key));
+  const workspaceValues = new Map(customValues.results.map((item) => [item.value_key, item.value]));
+  let customFields: Json = {};
+  try {
+    const parsed = JSON.parse(String(contact.custom_fields || "{}"));
+    if (isPlainObject(parsed)) customFields = parsed;
+  } catch { throw new ApiError(500, "Stored contact custom fields are invalid"); }
+  const standardFields = new Set(["email", "first_name", "last_name", "phone", "company", "status", "stage", "owner", "score", "source_last"]);
+  const resolved = template.replace(/\{\{([^{}]+)\}\}/g, (_token, raw: string) => {
+    const variable = raw.trim();
+    const standard = variable.match(/^contact\.([a-z_]+)$/);
+    if (standard && standardFields.has(standard[1])) return contact[standard[1]] == null ? "" : String(contact[standard[1]]);
+    const custom = variable.match(/^contact\.custom\.([a-z][a-z0-9_]{1,39})$/);
+    if (custom) {
+      if (!allowedCustomFields.has(custom[1])) throw new ApiError(400, `Unknown or archived contact variable: ${variable}`);
+      return customFields[custom[1]] == null ? "" : String(customFields[custom[1]]);
+    }
+    const workspaceValue = variable.match(/^custom_values\.([a-z][a-z0-9_]{1,59})$/);
+    if (workspaceValue) {
+      if (!workspaceValues.has(workspaceValue[1])) throw new ApiError(400, `Unknown or archived custom value: ${variable}`);
+      return workspaceValues.get(workspaceValue[1]) || "";
+    }
+    throw new ApiError(400, `Unsupported CRM variable: ${variable}`);
+  });
+  if (resolved.includes("{{") || resolved.includes("}}")) throw new ApiError(400, "CRM variable syntax is invalid");
+  if (!resolved.trim()) throw new ApiError(400, "Message resolves to empty text");
+  if (resolved.length > maxLength) throw new ApiError(400, `Message exceeds ${maxLength} characters after variable resolution`);
+  return resolved;
+}
+async function twilioProviderSend(env: FrameworkEnv, connection: Record<string, unknown>, input: {
+  to: string; body: string; statusCallback: string;
+}) {
+  const payload = new URLSearchParams({
+    MessagingServiceSid: String(connection.messaging_service_sid), To: input.to, Body: input.body,
+    StatusCallback: input.statusCallback,
+  });
+  const response = await twilioProviderRequest(env, connection,
+    `https://api.twilio.com/2010-04-01/Accounts/${String(connection.account_sid)}/Messages.json`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" }, body: payload.toString(),
+    });
+  const text = (await response.text()).slice(0, 8192); let result: unknown = null;
+  try { result = text ? JSON.parse(text) : null; } catch {}
+  if (!response.ok) return { ok: false as const, status: response.status,
+    error: twilioError(result, `Twilio returned HTTP ${response.status}`),
+    errorCode: isPlainObject(result) && result.code != null ? String(result.code).slice(0, 20) : null };
+  const sid = isPlainObject(result) ? String(result.sid || "") : "";
+  const status = isPlainObject(result) ? String(result.status || "") : "";
+  if (!/^(?:SM|MM)[0-9a-fA-F]{32}$/.test(sid) || !["accepted", "queued", "sending", "sent"].includes(status)) {
+    return { ok: false as const, status: 502, error: "Twilio returned an invalid message receipt", errorCode: null };
+  }
+  return { ok: true as const, status: response.status, providerMessageSid: sid, messageStatus: status,
+    from: isPlainObject(result) && typeof result.from === "string" ? result.from : "" };
+}
+async function validTwilioSignature(requestUrl: string, params: URLSearchParams, signature: string, authToken: string) {
+  if (!signature || signature.length > 200) return false;
+  const values = new Map<string, string>();
+  for (const [key, value] of params) {
+    if (values.has(key)) return false;
+    values.set(key, value);
+  }
+  let signed = requestUrl;
+  for (const key of [...values.keys()].sort()) signed += key + values.get(key);
+  const key = await crypto.subtle.importKey("raw", encoder.encode(authToken), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(signed)));
+  let provided: Uint8Array;
+  try { provided = base64ToBytes(signature); } catch { return false; }
+  if (provided.length !== digest.length) return false;
+  let mismatch = 0; for (let index = 0; index < digest.length; index += 1) mismatch |= digest[index] ^ provided[index];
+  return mismatch === 0;
+}
 async function recoveryKeyId(secret: string) {
   return (await sha256(secret)).slice(0, 16);
 }
@@ -1743,6 +1923,10 @@ const baseMemberContactGrantKeys = [
   "create", "note", "update",
   "update_field:stage", "update_field:status", "update_field:owner", "update_field:next_follow_up_at",
 ] as const;
+const allowedMemberContactOperationalGrantKeys = [
+  ...baseMemberContactGrantKeys,
+  "update_field:phone",
+] as const;
 const baseMemberOpportunityGrantKeys = [
   "read", "create", "update",
   "update_field:stage_id", "update_field:status", "update_field:value",
@@ -1763,7 +1947,7 @@ async function memberContactGrantContract(env: FrameworkEnv, workspaceId: string
   return {
     customFields,
     allowedGrants: [
-      ...baseMemberContactGrantKeys,
+      ...allowedMemberContactOperationalGrantKeys,
       ...customFields.flatMap((field) => [field.read_grant, field.grant]),
     ],
   };
@@ -1971,6 +2155,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/calendar": ["GET"],
     "/v1/admin/product-catalog": ["GET"],
     "/v1/admin/custom-fields": ["GET", "POST"],
+    "/v1/admin/custom-values": ["GET", "POST"],
     "/v1/admin/custom-objects": ["GET", "POST"],
     "/v1/admin/custom-relation-targets": ["GET"],
     "/v1/admin/page-layouts": ["GET"],
@@ -2011,6 +2196,10 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/resend-connection": ["GET", "POST", "DELETE"],
     "/v1/admin/resend-connection/verify": ["POST"],
     "/v1/admin/resend-connection/send": ["POST"],
+    "/v1/admin/twilio-connection": ["GET", "POST", "DELETE"],
+    "/v1/admin/twilio-connection/verify": ["POST"],
+    "/v1/admin/sms/send": ["POST"],
+    "/v1/admin/sms/threads": ["GET"],
     "/v1/admin/conversations": ["GET"],
     "/v1/admin/conversations/send": ["POST"],
     "/v1/admin/forms": ["GET", "POST"],
@@ -2039,6 +2228,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/estimates\/est_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/estimates\/est_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/custom-fields\/cfld_[a-f0-9]{32}$/, ["PATCH"]],
+    [/^\/v1\/admin\/custom-values\/cval_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/views$/, ["GET", "POST"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/records$/, ["GET", "POST"]],
@@ -2057,6 +2247,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/company-notes\/[^/]+$/, ["PATCH", "DELETE"]],
     [/^\/v1\/admin\/contacts\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
     [/^\/v1\/admin\/contacts\/[^/]+\/communication-consent$/, ["GET", "PUT"]],
+    [/^\/v1\/admin\/contacts\/[^/]+\/sms-consent$/, ["GET", "PUT"]],
+    [/^\/v1\/admin\/sms\/threads\/smst_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/conversations\/thread_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}$/, ["GET", "PATCH"]],
     [/^\/v1\/admin\/forms\/form_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
@@ -2462,6 +2654,9 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
   for (const row of tables.communication_consents) {
     requireReference("communication_consents", row, "contact_id", "contacts");
   }
+  for (const row of tables.sms_consents) {
+    requireReference("sms_consents", row, "contact_id", "contacts");
+  }
   for (const row of tables.conversation_threads) {
     requireReference("conversation_threads", row, "contact_id", "contacts", true);
   }
@@ -2744,6 +2939,19 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     fieldKeys.add(`${row.object_type}:${row.field_key}`);
     fieldKeysByObject.get(String(row.object_type))?.add(String(row.field_key));
   }
+  const customValueKeys = new Set<string>();
+  for (const row of tables.crm_custom_values) {
+    const key = String(row.value_key);
+    if (!/^[a-z][a-z0-9_]{1,59}$/.test(key) || customValueKeys.has(key) ||
+      typeof row.label !== "string" || !row.label.trim() || row.label.length > 80 ||
+      typeof row.value !== "string" || row.value.length > 5000 ||
+      (row.folder !== null && row.folder !== undefined &&
+        (typeof row.folder !== "string" || !row.folder.trim() || row.folder.length > 80)) ||
+      ![0, 1].includes(Number(row.active)) || !Number.isInteger(row.revision) || Number(row.revision) < 1) {
+      throw new ApiError(400, "Backup contains an invalid custom value");
+    }
+    customValueKeys.add(key);
+  }
   const layoutObjects = new Set<string>();
   for (const row of tables.object_page_layouts) {
     let sections: unknown;
@@ -2879,6 +3087,21 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     }
     consentContacts.add(contactId);
   }
+  const smsConsentContacts = new Set<string>();
+  for (const row of tables.sms_consents) {
+    const contactId = String(row.contact_id);
+    if (smsConsentContacts.has(contactId) ||
+      !["unknown", "opted_in", "opted_out"].includes(String(row.status)) ||
+      !["unknown", "express", "contractual", "inbound_request", "manual_suppression", "provider_stop"].includes(String(row.basis)) ||
+      !Number.isInteger(row.revision) || Number(row.revision) < 1 ||
+      (row.provider_opt_out_type !== null && row.provider_opt_out_type !== undefined &&
+        !["STOP", "START", "HELP"].includes(String(row.provider_opt_out_type))) ||
+      (row.status === "opted_out" && !["manual_suppression", "provider_stop"].includes(String(row.basis))) ||
+      (row.status === "opted_in" && !["express", "contractual", "inbound_request"].includes(String(row.basis)))) {
+      throw new ApiError(400, "Backup contains invalid SMS consent");
+    }
+    smsConsentContacts.add(contactId);
+  }
   const messageIdempotency = new Set<string>();
   const providerReceipts = new Set<string>();
   for (const row of tables.conversation_threads) {
@@ -2943,7 +3166,8 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
       ? validateAutomationCustomMetadata(tables.custom_field_definitions as CustomFieldDefinition[],
         String(row.trigger_type), conditions, [
           ...(Array.isArray(actions) ? actions : []), ...(Array.isArray(elseActions) ? elseActions : []),
-        ]) : "";
+        ], new Set(tables.crm_custom_values.filter((value) => Number(value.active) === 1)
+          .map((value) => String(value.value_key)))) : "";
     if (!Array.isArray(conditions) || !Array.isArray(actions) || !Array.isArray(elseActions) ||
       !Array.isArray(authorityManifest) ||
       !["draft", "active", "paused"].includes(String(row.status)) ||
@@ -4100,6 +4324,7 @@ function automationRecordType(triggerType: string) {
 
 const workflowStepIdPattern = /^step_[a-f0-9]{32}$/;
 const automationCustomVariablePattern = /^(contact|opportunity)\.custom\.([a-z][a-z0-9_]{1,39})$/;
+const automationWorkspaceValuePattern = /^custom_values\.([a-z][a-z0-9_]{1,59})$/;
 type WorkflowStepOutputs = Map<string, Record<string, string>>;
 
 function automationCustomVariableReferences(value: unknown) {
@@ -4109,6 +4334,21 @@ function automationCustomVariableReferences(value: unknown) {
       for (const match of candidate.matchAll(/\{\{([^{}]+)\}\}/g)) {
         const variable = match[1].trim();
         if (automationCustomVariablePattern.test(variable)) references.add(variable);
+      }
+    } else if (Array.isArray(candidate)) candidate.forEach(visit);
+    else if (isPlainObject(candidate)) Object.values(candidate).forEach(visit);
+  };
+  visit(value);
+  return [...references].sort();
+}
+
+function automationWorkspaceValueReferences(value: unknown) {
+  const references = new Set<string>();
+  const visit = (candidate: unknown) => {
+    if (typeof candidate === "string") {
+      for (const match of candidate.matchAll(/\{\{([^{}]+)\}\}/g)) {
+        const variable = match[1].trim();
+        if (automationWorkspaceValuePattern.test(variable)) references.add(variable);
       }
     } else if (Array.isArray(candidate)) candidate.forEach(visit);
     else if (isPlainObject(candidate)) Object.values(candidate).forEach(visit);
@@ -4139,6 +4379,7 @@ function validateAutomationTemplate(value: string, recordType: "contact" | "oppo
       if (customReference[1] !== recordType) return `Automation variable belongs to another object: ${variable}`;
       continue;
     }
+    if (automationWorkspaceValuePattern.test(variable)) continue;
     const stepReference = variable.match(/^steps\.(step_[a-f0-9]{32})\.([a-z][a-z0-9_]*)$/);
     if (!stepReference) return `Unsupported automation variable: ${variable}`;
     const available = priorStepOutputs.get(stepReference[1]);
@@ -4153,7 +4394,8 @@ function validateAutomationTemplate(value: string, recordType: "contact" | "oppo
 }
 
 function resolveAutomationTemplate(value: string, record: Record<string, unknown>, maxLength: number, field: string,
-  recordType: "contact" | "opportunity" = "opportunity", stepOutputs: WorkflowStepOutputs = new Map()) {
+  recordType: "contact" | "opportunity" = "opportunity", stepOutputs: WorkflowStepOutputs = new Map(),
+  workspaceValues: Map<string, string> = new Map()) {
   const allowedVariables = recordType === "contact" ? automationContactVariables : automationOpportunityVariables;
   const prefix = `${recordType}.`;
   const resolved = value.replace(/\{\{([^{}]+)\}\}/g, (_, rawVariable: string) => {
@@ -4174,6 +4416,11 @@ function resolveAutomationTemplate(value: string, record: Record<string, unknown
       if (!isPlainObject(customFields)) throw new Error(`${field} cannot read governed field data`);
       const recordValue = customFields[customReference[2]];
       return recordValue === null || recordValue === undefined ? "" : String(recordValue);
+    }
+    const workspaceValue = variable.match(automationWorkspaceValuePattern);
+    if (workspaceValue) {
+      if (!workspaceValues.has(workspaceValue[1])) throw new Error(`Automation custom value is unavailable: ${variable}`);
+      return workspaceValues.get(workspaceValue[1]) || "";
     }
     const stepReference = variable.match(/^steps\.(step_[a-f0-9]{32})\.([a-z][a-z0-9_]*)$/);
     if (!stepReference) throw new Error(`Unsupported automation variable: ${variable}`);
@@ -4339,6 +4586,7 @@ function validateAutomationCustomMetadata(
   triggerType: string,
   conditions: unknown[],
   actions: unknown[] = [],
+  customValueKeys: Set<string> = new Set(),
 ) {
   const objectType = automationRecordType(triggerType);
   const byKey = new Map(definitions.filter((definition) =>
@@ -4374,18 +4622,30 @@ function validateAutomationCustomMetadata(
       return `Automation variable references an unknown or archived field: ${reference[2]}`;
     }
   }
+  for (const variable of automationWorkspaceValueReferences(actions)) {
+    const reference = variable.match(automationWorkspaceValuePattern);
+    if (!reference || !customValueKeys.has(reference[1])) {
+      return `Automation variable references an unknown or archived custom value: ${variable}`;
+    }
+  }
   return "";
 }
 
 async function validateStoredAutomationCustomMetadata(
   env: FrameworkEnv, workspaceId: string, triggerType: string, conditions: unknown[], actions: unknown[] = [],
 ) {
-  const definitions = await env.DB.prepare(`SELECT * FROM custom_field_definitions
-    WHERE workspace_id=? AND active=1`).bind(workspaceId).all<CustomFieldDefinition>();
-  return validateAutomationCustomMetadata(definitions.results, triggerType, conditions, actions);
+  const [definitions, customValues] = await Promise.all([
+    env.DB.prepare(`SELECT * FROM custom_field_definitions WHERE workspace_id=? AND active=1`)
+      .bind(workspaceId).all<CustomFieldDefinition>(),
+    env.DB.prepare(`SELECT value_key FROM crm_custom_values WHERE workspace_id=? AND active=1`)
+      .bind(workspaceId).all<{ value_key: string }>(),
+  ]);
+  return validateAutomationCustomMetadata(definitions.results, triggerType, conditions, actions,
+    new Set(customValues.results.map((value) => value.value_key)));
 }
 
 async function automationDefinitionHealth(
+  env: FrameworkEnv,
   rule: Record<string, unknown>,
   definitions: CustomFieldDefinition[],
 ) {
@@ -4399,8 +4659,10 @@ async function automationDefinitionHealth(
     const definitionError = validateAutomationDefinition(String(rule.trigger_type), conditions, actions) ||
       validateAutomationDefinition(String(rule.trigger_type), [], elseActions);
     if (definitionError) return { metadata_status: "blocked", metadata_error: definitionError };
+    const customValues = await env.DB.prepare(`SELECT value_key FROM crm_custom_values WHERE workspace_id=? AND active=1`)
+      .bind(rule.workspace_id).all<{ value_key: string }>();
     const metadataError = validateAutomationCustomMetadata(definitions, String(rule.trigger_type), conditions,
-      [...actions, ...elseActions]);
+      [...actions, ...elseActions], new Set(customValues.results.map((value) => value.value_key)));
     if (metadataError) return { metadata_status: "blocked", metadata_error: metadataError };
     const authority = await workflowAuthority(actions, elseActions);
     if (String(rule.authority_manifest || "[]") !== authority.serialized ||
@@ -4466,6 +4728,10 @@ function deriveWorkflowAuthority(actions: unknown[], elseActions: unknown[]) {
   for (const variable of automationCustomVariableReferences([actions, elseActions])) {
     const reference = variable.match(automationCustomVariablePattern);
     if (reference) capabilities.add(`custom_field.read:${reference[1]}:${reference[2]}`);
+  }
+  for (const variable of automationWorkspaceValueReferences([actions, elseActions])) {
+    const reference = variable.match(automationWorkspaceValuePattern);
+    if (reference) capabilities.add(`custom_value.read:${reference[1]}`);
   }
   return [...capabilities].sort();
 }
@@ -4565,9 +4831,13 @@ async function runOpportunityAutomations(
     ORDER BY created_at LIMIT 50`)
     .bind(access.workspaceId, triggerType, options.onlyRuleId || null, options.onlyRuleId || null)
     .all<Record<string, unknown>>();
-  const customDefinitions = await env.DB.prepare(`SELECT * FROM custom_field_definitions
-    WHERE workspace_id=? AND object_type='opportunity' AND active=1`)
-    .bind(access.workspaceId).all<CustomFieldDefinition>();
+  const [customDefinitions, customValueRows] = await Promise.all([
+    env.DB.prepare(`SELECT * FROM custom_field_definitions WHERE workspace_id=? AND object_type='opportunity' AND active=1`)
+      .bind(access.workspaceId).all<CustomFieldDefinition>(),
+    env.DB.prepare(`SELECT value_key,value FROM crm_custom_values WHERE workspace_id=? AND active=1`)
+      .bind(access.workspaceId).all<{ value_key: string; value: string }>(),
+  ]);
+  const workspaceValues = new Map(customValueRows.results.map((value) => [value.value_key, value.value]));
   const insertedRunIds: string[] = [];
   for (const rule of rules.results) {
     const priorRuns = await env.DB.prepare(`SELECT COUNT(*) total FROM automation_runs
@@ -4578,7 +4848,7 @@ async function runOpportunityAutomations(
     const allActions = JSON.parse(String(rule.actions)) as Json[];
     const allElseActions = JSON.parse(String(rule.else_actions || "[]")) as Json[];
     if (validateAutomationCustomMetadata(customDefinitions.results, triggerType, conditions,
-      [...allActions, ...allElseActions])) continue;
+      [...allActions, ...allElseActions], new Set(workspaceValues.keys()))) continue;
     const matched = !conditions.length || conditions.every((condition) => automationConditionMatches(opportunity, condition));
     const actions = matched ? allActions : allElseActions;
     if (!actions.length) continue;
@@ -4612,7 +4882,7 @@ async function runOpportunityAutomations(
         if (action.type === "create_task") {
           const taskId = id("task");
           const titleTemplate = optionalString(action.title, "action.title", 200) || "Follow up on {{opportunity.name}}";
-          const title = resolveAutomationTemplate(titleTemplate, opportunity, 200, "Automation task title", "opportunity", stepOutputs);
+          const title = resolveAutomationTemplate(titleTemplate, opportunity, 200, "Automation task title", "opportunity", stepOutputs, workspaceValues);
           const dueMinutes = boundedNumber(action.due_in_minutes, "action.due_in_minutes", 0, 525_600, 0);
           const priority = optionalString(action.priority, "action.priority", 20) || "normal";
           const dueAt = new Date(Date.now() + dueMinutes * 60_000).toISOString();
@@ -4640,7 +4910,7 @@ async function runOpportunityAutomations(
           const noteId = id("note");
           const bodyTemplate = optionalString(action.body, "action.body", 4000);
           if (!bodyTemplate) throw new Error("Automation note body is required");
-          const body = resolveAutomationTemplate(bodyTemplate, opportunity, 4000, "Automation note body", "opportunity", stepOutputs);
+          const body = resolveAutomationTemplate(bodyTemplate, opportunity, 4000, "Automation note body", "opportunity", stepOutputs, workspaceValues);
           actionStatements.push(env.DB.prepare(`INSERT INTO notes(id,workspace_id,contact_id,author,body,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?)`).bind(noteId, access.workspaceId, opportunity.contact_id, principalId, body, now, now));
           appendWorkflowActionOutput(output, stepOutputs, action, { action: "add_note", note_id: noteId });
@@ -4649,7 +4919,7 @@ async function runOpportunityAutomations(
           const field = String(action.field);
           const resolvedValue = typeof action.value === "string"
             ? resolveAutomationTemplate(action.value, opportunity, field === "next_step" ? 500 : 254,
-              "Automation opportunity value", "opportunity", stepOutputs)
+              "Automation opportunity value", "opportunity", stepOutputs, workspaceValues)
             : action.value;
           const proposedAction = { type: "update_opportunity", opportunity_id: opportunity.id,
             expected_updated_at: opportunity.updated_at, changes: { [field]: resolvedValue } };
@@ -4666,7 +4936,7 @@ async function runOpportunityAutomations(
         } else if (action.type === "request_agent") {
           const workItemId = id("work");
           const instructions = resolveAutomationTemplate(String(action.instructions), opportunity, 1000,
-            "Automation agent instructions", "opportunity", stepOutputs);
+            "Automation agent instructions", "opportunity", stepOutputs, workspaceValues);
           actionStatements.push(env.DB.prepare(`INSERT INTO agent_work_items
             (id,workspace_id,automation_rule_id,automation_run_id,contact_id,opportunity_id,objective,instructions,
              preferred_provider,status,created_at,updated_at)
@@ -4718,9 +4988,13 @@ async function runContactAutomations(
     WHERE workspace_id=? AND status='active' AND trigger_type=? AND (? IS NULL OR id=?)
     ORDER BY created_at LIMIT 50`).bind(access.workspaceId, triggerType, options.onlyRuleId || null, options.onlyRuleId || null)
     .all<Record<string, unknown>>();
-  const customDefinitions = await env.DB.prepare(`SELECT * FROM custom_field_definitions
-    WHERE workspace_id=? AND object_type='contact' AND active=1`)
-    .bind(access.workspaceId).all<CustomFieldDefinition>();
+  const [customDefinitions, customValueRows] = await Promise.all([
+    env.DB.prepare(`SELECT * FROM custom_field_definitions WHERE workspace_id=? AND object_type='contact' AND active=1`)
+      .bind(access.workspaceId).all<CustomFieldDefinition>(),
+    env.DB.prepare(`SELECT value_key,value FROM crm_custom_values WHERE workspace_id=? AND active=1`)
+      .bind(access.workspaceId).all<{ value_key: string; value: string }>(),
+  ]);
+  const workspaceValues = new Map(customValueRows.results.map((value) => [value.value_key, value.value]));
   const insertedRunIds: string[] = [];
   for (const rule of rules.results) {
     const priorRuns = await env.DB.prepare(`SELECT COUNT(*) total FROM automation_runs
@@ -4731,7 +5005,7 @@ async function runContactAutomations(
     const allActions = JSON.parse(String(rule.actions)) as Json[];
     const allElseActions = JSON.parse(String(rule.else_actions || "[]")) as Json[];
     if (validateAutomationCustomMetadata(customDefinitions.results, triggerType, conditions,
-      [...allActions, ...allElseActions])) continue;
+      [...allActions, ...allElseActions], new Set(workspaceValues.keys()))) continue;
     const matched = !conditions.length || conditions.every((condition) => automationConditionMatches(contact, condition));
     const actions = matched ? allActions : allElseActions;
     if (!actions.length) continue;
@@ -4765,7 +5039,7 @@ async function runContactAutomations(
         if (action.type === "create_task") {
           const taskId = id("task");
           const title = resolveAutomationTemplate(optionalString(action.title, "action.title", 200) || "Follow up", contact, 200,
-            "Automation task title", "contact", stepOutputs);
+            "Automation task title", "contact", stepOutputs, workspaceValues);
           const dueMinutes = boundedNumber(action.due_in_minutes, "action.due_in_minutes", 0, 525_600, 0);
           const priority = optionalString(action.priority, "action.priority", 20) || "normal";
           const dueAt = new Date(Date.now() + dueMinutes * 60_000).toISOString();
@@ -4794,7 +5068,7 @@ async function runContactAutomations(
           const noteId = id("note");
           const bodyTemplate = optionalString(action.body, "action.body", 4000);
           if (!bodyTemplate) throw new Error("Automation note body is required");
-          const body = resolveAutomationTemplate(bodyTemplate, contact, 4000, "Automation note body", "contact", stepOutputs);
+          const body = resolveAutomationTemplate(bodyTemplate, contact, 4000, "Automation note body", "contact", stepOutputs, workspaceValues);
           actionStatements.push(env.DB.prepare(`INSERT INTO notes(id,workspace_id,contact_id,author,body,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?)`).bind(noteId, access.workspaceId, contact.id, principalId, body, now, now));
           appendWorkflowActionOutput(output, stepOutputs, action, { action: "add_note", note_id: noteId });
@@ -4807,7 +5081,7 @@ async function runContactAutomations(
             ? null
             : typeof rawValue === "string" && !customKey
               ? resolveAutomationTemplate(rawValue, contact, field === "owner" ? 254 : 30,
-                "Automation contact value", "contact", stepOutputs)
+                "Automation contact value", "contact", stepOutputs, workspaceValues)
               : rawValue;
           const proposedAction = { type: "update_contact", contact_id: contact.id,
             expected_updated_at: contact.updated_at,
@@ -4825,7 +5099,7 @@ async function runContactAutomations(
         } else if (action.type === "request_agent") {
           const workItemId = id("work");
           const instructions = resolveAutomationTemplate(String(action.instructions), contact, 1000,
-            "Automation agent instructions", "contact", stepOutputs);
+            "Automation agent instructions", "contact", stepOutputs, workspaceValues);
           actionStatements.push(env.DB.prepare(`INSERT INTO agent_work_items
             (id,workspace_id,automation_rule_id,automation_run_id,contact_id,opportunity_id,objective,instructions,
              preferred_provider,status,created_at,updated_at)
@@ -6480,6 +6754,133 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     });
   }
 
+  const twilioHookMatch = url.pathname.match(/^\/v1\/hooks\/twilio\/(inbound|status)\/(twc_[a-f0-9]{32})$/);
+  if (twilioHookMatch) {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    const contentType = request.headers.get("content-type") || "";
+    if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+      return json({ error: "Twilio webhook must use form encoding" }, 415);
+    }
+    const rawBody = new TextDecoder().decode(await request.arrayBuffer());
+    if (encoder.encode(rawBody).byteLength > 64 * 1024) return json({ error: "Webhook payload is too large" }, 413);
+    const connection = await env.DB.prepare("SELECT * FROM twilio_connections WHERE id=? AND status<>'revoked'")
+      .bind(twilioHookMatch[2]).first<Record<string, unknown>>();
+    if (!connection) return json({ error: "Twilio connection not found" }, 404);
+    const params = new URLSearchParams(rawBody);
+    let authToken: string;
+    try { authToken = await twilioAuthToken(env, connection); } catch { return json({ error: "Twilio webhook could not be authenticated" }, 503); }
+    if (!(await validTwilioSignature(request.url, params, request.headers.get("x-twilio-signature") || "", authToken))) {
+      return json({ error: "Invalid Twilio signature" }, 403);
+    }
+    const accountSid = params.get("AccountSid") || "";
+    const messageSid = params.get("MessageSid") || params.get("SmsSid") || "";
+    if (accountSid !== connection.account_sid || !/^(?:SM|MM)[0-9a-fA-F]{32}$/.test(messageSid)) {
+      return json({ error: "Twilio webhook identity does not match this connection" }, 400);
+    }
+    const requestHash = await sha256(`${request.url}\n${rawBody}`);
+    const signatureHash = await sha256(request.headers.get("x-twilio-signature") || "");
+    const now = new Date().toISOString();
+    const receiptId = id("twrec");
+    try {
+      await env.DB.prepare(`INSERT INTO twilio_webhook_receipts
+        (id,workspace_id,connection_id,event_type,request_hash,signature_hash,provider_message_sid,processed_at)
+        VALUES(?,?,?,?,?,?,?,?)`).bind(receiptId, connection.workspace_id, connection.id, twilioHookMatch[1],
+          requestHash, signatureHash, messageSid, now).run();
+    } catch {
+      return new Response("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>", {
+        headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "no-store", ...securityHeaders },
+      });
+    }
+    if (twilioHookMatch[1] === "inbound") {
+      const from = normalizeE164(params.get("From")); const to = normalizeE164(params.get("To"));
+      const bodyText = String(params.get("Body") || "").slice(0, 1600);
+      const messagingServiceSid = params.get("MessagingServiceSid");
+      const optOutType = params.get("OptOutType");
+      if (!from || !to || !bodyText || (messagingServiceSid && messagingServiceSid !== connection.messaging_service_sid) ||
+        (optOutType && !["STOP", "START", "HELP"].includes(optOutType))) {
+        await env.DB.prepare("DELETE FROM twilio_webhook_receipts WHERE id=?").bind(receiptId).run();
+        return json({ error: "Twilio inbound message is invalid" }, 400);
+      }
+      const contact = await env.DB.prepare(`SELECT * FROM contacts WHERE workspace_id=? AND phone=? LIMIT 1`)
+        .bind(connection.workspace_id, from).first<Record<string, unknown>>();
+      const thread = await env.DB.prepare("SELECT * FROM sms_threads WHERE workspace_id=? AND participant_phone=?")
+        .bind(connection.workspace_id, from).first<Record<string, unknown>>();
+      const threadId = thread ? String(thread.id) : id("smst");
+      const messageId = id("sms"); const changeId = id("chg");
+      const statements: D1PreparedStatement[] = [];
+      if (!thread) {
+        statements.push(env.DB.prepare(`INSERT INTO sms_threads
+          (id,workspace_id,connection_id,contact_id,participant_phone,status,last_message_at,unread_count,revision,change_id,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,1,1,?,?,?)`).bind(threadId, connection.workspace_id, connection.id, contact?.id || null,
+            from, contact ? "open" : "quarantined", now, changeId, now, now));
+      } else {
+        statements.push(env.DB.prepare(`UPDATE sms_threads SET contact_id=COALESCE(contact_id,?),last_message_at=?,
+          unread_count=unread_count+1,revision=revision+1,change_id=?,updated_at=? WHERE id=? AND workspace_id=?`)
+          .bind(contact?.id || null, now, changeId, now, threadId, connection.workspace_id));
+      }
+      statements.push(env.DB.prepare(`INSERT INTO sms_messages
+        (id,workspace_id,connection_id,thread_id,contact_id,direction,provider_message_sid,idempotency_key,request_hash,
+         from_phone,to_phone,body_text,purpose,status,opt_out_type,provider_status_at,occurred_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,'inbound',?,?,?,?,?,?,?,'received',?,?,?,?,?)`)
+        .bind(messageId, connection.workspace_id, connection.id, threadId, contact?.id || null, messageSid,
+          `twilio-inbound:${messageSid}`, requestHash, from, to, bodyText, "inbound", optOutType || null, now, now, now, now));
+      if (contact && optOutType === "STOP") {
+        statements.push(env.DB.prepare(`INSERT INTO sms_consents
+          (id,workspace_id,contact_id,status,basis,evidence,captured_at,provider_opt_out_type,revision,change_id,created_by,created_at,updated_at)
+          VALUES(?,?,?,'opted_out','provider_stop',?,?, 'STOP',1,?,'system:twilio',?,?)
+          ON CONFLICT(workspace_id,contact_id) DO UPDATE SET status='opted_out',basis='provider_stop',evidence=excluded.evidence,
+            captured_at=excluded.captured_at,provider_opt_out_type='STOP',revision=sms_consents.revision+1,
+            change_id=excluded.change_id,created_by='system:twilio',updated_at=excluded.updated_at`)
+          .bind(id("smscons"), connection.workspace_id, contact.id, `Twilio OptOutType STOP; message ${messageSid}`, now,
+            id("chg"), now, now));
+      } else if (contact && optOutType === "START") {
+        statements.push(env.DB.prepare(`INSERT INTO sms_consents
+          (id,workspace_id,contact_id,status,basis,evidence,captured_at,provider_opt_out_type,revision,change_id,created_by,created_at,updated_at)
+          VALUES(?,?,?,'opted_in','inbound_request',?,?,'START',1,?,'system:twilio',?,?)
+          ON CONFLICT(workspace_id,contact_id) DO UPDATE SET status='opted_in',basis='inbound_request',evidence=excluded.evidence,
+            captured_at=excluded.captured_at,provider_opt_out_type='START',revision=sms_consents.revision+1,
+            change_id=excluded.change_id,created_by='system:twilio',updated_at=excluded.updated_at`)
+          .bind(id("smscons"), connection.workspace_id, contact.id, `Twilio OptOutType START; message ${messageSid}`, now,
+            id("chg"), now, now));
+      }
+      try {
+        await env.DB.batch(statements);
+      } catch (error) {
+        await env.DB.prepare("DELETE FROM twilio_webhook_receipts WHERE id=?").bind(receiptId).run();
+        throw error;
+      }
+      await systemAudit(env, String(connection.workspace_id), "twilio-webhook", "sms.message_received", "sms_message", messageId,
+        { contact_id: contact?.id || null, thread_id: threadId, opt_out_type: optOutType || null, quarantined: !contact });
+      return new Response("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>", {
+        headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "no-store", ...securityHeaders },
+      });
+    }
+    const messageStatus = String(params.get("MessageStatus") || "");
+    const normalizedStatus = ["accepted", "queued", "sending", "sent", "delivered", "undelivered", "failed"].includes(messageStatus)
+      ? messageStatus : "unknown";
+    const stored = await env.DB.prepare(`SELECT * FROM sms_messages
+      WHERE workspace_id=? AND connection_id=? AND provider_message_sid=? AND direction='outbound'`)
+      .bind(connection.workspace_id, connection.id, messageSid).first<Record<string, unknown>>();
+    if (!stored) {
+      await env.DB.prepare("DELETE FROM twilio_webhook_receipts WHERE id=?").bind(receiptId).run();
+      return json({ error: "SMS message receipt was not found" }, 404);
+    }
+    const rank: Record<string, number> = { pending: 0, accepted: 1, queued: 2, sending: 3, sent: 4, delivered: 5, undelivered: 5, failed: 5, unknown: 0 };
+    const terminal = new Set(["delivered", "undelivered", "failed"]);
+    const shouldUpdate = !terminal.has(String(stored.status)) && rank[normalizedStatus] >= (rank[String(stored.status)] ?? 0);
+    if (shouldUpdate) {
+      const errorCode = params.get("ErrorCode");
+      await env.DB.prepare(`UPDATE sms_messages SET status=?,error_code=?,error=?,provider_status_at=?,updated_at=?
+        WHERE id=? AND workspace_id=?`).bind(normalizedStatus, errorCode || null,
+          errorCode ? `Twilio delivery error ${errorCode}` : null, now, now, stored.id, connection.workspace_id).run();
+      await systemAudit(env, String(connection.workspace_id), "twilio-webhook", "sms.delivery_updated", "sms_message",
+        String(stored.id), { previous_status: stored.status, status: normalizedStatus, error_code: errorCode || null });
+    }
+    return new Response("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>", {
+      headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "no-store", ...securityHeaders },
+    });
+  }
+
   const access = await getWorkspaceAccess(request, env);
   if (!access) return json({ error: "Unauthorized" }, 401);
   const workspaceId = access.workspaceId;
@@ -7582,17 +7983,30 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       return json({ error: "limit must be an integer from 1 to 100" }, 400);
     }
     const limit = requestedLimit;
-    const threads = await env.DB.prepare(`SELECT t.*,
-      TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
-      cc.id consent_id,cc.status consent_status,cc.basis consent_basis,cc.evidence consent_evidence,
-      cc.captured_at consent_captured_at,cc.revision consent_revision,cc.updated_at consent_updated_at
-      FROM conversation_threads t
-      LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
-      LEFT JOIN communication_consents cc ON cc.workspace_id=t.workspace_id AND cc.contact_id=t.contact_id AND cc.channel='email'
-      WHERE t.workspace_id=? ORDER BY t.last_message_at DESC,t.id DESC LIMIT ?`)
-      .bind(workspaceId, limit).all<Record<string, unknown>>();
-    return json({ threads: threads.results.map(safeConversationThread), truncated: threads.results.length === limit,
-      limits: { threads: 100, messages_per_thread: 100, body_characters: 10_000 } });
+    const [emailThreads, smsThreads] = await Promise.all([
+      env.DB.prepare(`SELECT t.*,
+        TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
+        cc.id consent_id,cc.status consent_status,cc.basis consent_basis,cc.evidence consent_evidence,
+        cc.captured_at consent_captured_at,cc.revision consent_revision,cc.updated_at consent_updated_at
+        FROM conversation_threads t
+        LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
+        LEFT JOIN communication_consents cc ON cc.workspace_id=t.workspace_id AND cc.contact_id=t.contact_id AND cc.channel='email'
+        WHERE t.workspace_id=? ORDER BY t.last_message_at DESC,t.id DESC LIMIT ?`)
+        .bind(workspaceId, limit).all<Record<string, unknown>>(),
+      env.DB.prepare(`SELECT t.*,TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
+        sc.id consent_id,sc.status consent_status,sc.basis consent_basis,sc.evidence consent_evidence,
+        sc.captured_at consent_captured_at,sc.provider_opt_out_type consent_provider_opt_out_type,
+        sc.revision consent_revision,sc.updated_at consent_updated_at
+        FROM sms_threads t LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
+        LEFT JOIN sms_consents sc ON sc.workspace_id=t.workspace_id AND sc.contact_id=t.contact_id
+        WHERE t.workspace_id=? ORDER BY t.last_message_at DESC,t.id DESC LIMIT ?`)
+        .bind(workspaceId, limit).all<Record<string, unknown>>(),
+    ]);
+    const combined = [...emailThreads.results.map(safeConversationThread), ...smsThreads.results.map(safeSmsThread)]
+      .sort((left, right) => String(right.last_message_at).localeCompare(String(left.last_message_at)) || String(right.id).localeCompare(String(left.id)))
+      .slice(0, limit);
+    return json({ threads: combined, truncated: emailThreads.results.length + smsThreads.results.length > limit,
+      limits: { threads: 100, messages_per_thread: 500, email_body_characters: 10_000, sms_body_characters: 1600 } });
   }
 
   const conversationThreadMatch = url.pathname.match(/^\/v1\/admin\/conversations\/(thread_[a-f0-9]{32})$/);
@@ -7908,6 +8322,289 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     return json({ ok: true });
   }
 
+  if (url.pathname === "/v1/admin/twilio-connection" && request.method === "GET") {
+    const connection = await env.DB.prepare(`SELECT * FROM twilio_connections
+      WHERE workspace_id=? AND status<>'revoked' LIMIT 1`).bind(workspaceId).first<Record<string, unknown>>();
+    const deliveries = isWorkspaceAdmin(access) ? await env.DB.prepare(`SELECT id,thread_id,contact_id,direction,
+      provider_message_sid,to_phone,substr(body_text,1,160) body_excerpt,purpose,status,error_code,error,sent_by,occurred_at,updated_at
+      FROM sms_messages WHERE workspace_id=? ORDER BY occurred_at DESC,id DESC LIMIT 25`).bind(workspaceId).all() : { results: [] };
+    return json({
+      connection: safeTwilioConnection(connection, url.origin), deliveries: deliveries.results,
+      history_visible: isWorkspaceAdmin(access),
+      runtime: { encryption_configured: Boolean(env.WEBHOOK_ENCRYPTION_KEY && env.WEBHOOK_ENCRYPTION_KEY.length >= 24) },
+      limits: { hourly_sends: 50, body_characters: 1600, history: 25 },
+      compliance: {
+        advanced_opt_out_api: false,
+        note: "Advanced Opt-Out is console-only. Its state is an administrator attestation, not an API verification.",
+      },
+    });
+  }
+
+  if (url.pathname === "/v1/admin/twilio-connection" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    if (!env.WEBHOOK_ENCRYPTION_KEY || env.WEBHOOK_ENCRYPTION_KEY.length < 24) {
+      return json({ error: "Workspace secret encryption is not configured" }, 503);
+    }
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["label", "account_sid", "auth_token", "messaging_service_sid"].includes(key))) {
+      return json({ error: "Twilio connection contains unsupported fields" }, 400);
+    }
+    const label = optionalString(body.label, "label", 80) || "Twilio Messaging";
+    const accountSid = String(body.account_sid || "").trim();
+    const authToken = String(body.auth_token || "").trim();
+    const messagingServiceSid = String(body.messaging_service_sid || "").trim();
+    if (!/^AC[0-9a-fA-F]{32}$/.test(accountSid) || !/^[A-Za-z0-9]{20,128}$/.test(authToken) ||
+      !/^MG[0-9a-fA-F]{32}$/.test(messagingServiceSid)) {
+      return json({ error: "A valid Twilio Account SID, Auth Token, and Messaging Service SID are required" }, 400);
+    }
+    const existing = await env.DB.prepare("SELECT id FROM twilio_connections WHERE workspace_id=? AND status<>'revoked'")
+      .bind(workspaceId).first();
+    if (existing) return json({ error: "Disconnect the existing Twilio connection before replacing it" }, 409);
+    const connectionId = id("twc"); const now = new Date().toISOString(); const changeId = id("chg");
+    const encrypted = await encryptWorkspaceSecret(env, workspaceId, "twilio", connectionId, authToken);
+    const created = {
+      id: connectionId, workspace_id: workspaceId, label, account_sid: accountSid,
+      auth_token_prefix: `${authToken.slice(0, 4)}••••`, auth_token_ciphertext: encrypted,
+      messaging_service_sid: messagingServiceSid, status: "pending", advanced_opt_out_status: "unverified",
+      last_verified_at: null, last_error: null, revision: 1, change_id: changeId,
+      created_by: access.email, created_at: now, updated_at: now,
+    };
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO twilio_connections
+        (id,workspace_id,label,account_sid,auth_token_prefix,auth_token_ciphertext,messaging_service_sid,status,
+         advanced_opt_out_status,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,'pending','unverified',1,?,?,?,?)`)
+        .bind(connectionId, workspaceId, label, accountSid, created.auth_token_prefix, encrypted,
+          messagingServiceSid, changeId, access.email, now, now),
+      await auditStatement(env, access, request, "twilio.connection_created", "twilio_connection", connectionId,
+        null, safeTwilioConnection(created, url.origin)),
+    ]);
+    return json({ connection: safeTwilioConnection(created, url.origin) }, 201);
+  }
+
+  if (url.pathname === "/v1/admin/twilio-connection/verify" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["expected_revision", "advanced_opt_out_status"].includes(key))) {
+      return json({ error: "Verification request contains unsupported fields" }, 400);
+    }
+    const expectedRevision = Number(body.expected_revision);
+    const advancedStatus = String(body.advanced_opt_out_status || "unverified");
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 1 || !["unverified", "enabled", "disabled"].includes(advancedStatus)) {
+      return json({ error: "expected_revision and an explicit Advanced Opt-Out console state are required" }, 400);
+    }
+    const connection = await env.DB.prepare(`SELECT * FROM twilio_connections
+      WHERE workspace_id=? AND status<>'revoked' LIMIT 1`).bind(workspaceId).first<Record<string, unknown>>();
+    if (!connection) return json({ error: "Twilio is not connected" }, 404);
+    if (Number(connection.revision) !== expectedRevision) return json({ error: "Twilio connection changed since it was loaded", code: "edit_conflict" }, 409);
+    let verification: Awaited<ReturnType<typeof verifyTwilioConnection>>;
+    try { verification = await verifyTwilioConnection(env, connection); }
+    catch { verification = { ok: false, error: "Twilio could not be reached" }; }
+    const now = new Date().toISOString(); const changeId = id("chg");
+    const status = verification.ok ? "active" : "error"; const lastError = verification.ok ? null : verification.error;
+    const updated = await env.DB.prepare(`UPDATE twilio_connections SET status=?,advanced_opt_out_status=?,
+      last_verified_at=?,last_error=?,revision=revision+1,change_id=?,updated_at=?
+      WHERE id=? AND workspace_id=? AND revision=? AND status<>'revoked' RETURNING *`)
+      .bind(status, advancedStatus, verification.ok ? now : null, lastError, changeId, now,
+        connection.id, workspaceId, expectedRevision).first<Record<string, unknown>>();
+    if (!updated) return json({ error: "Twilio connection changed since it was loaded", code: "edit_conflict" }, 409);
+    await audit(env, access, request, verification.ok ? "twilio.connection_verified" : "twilio.connection_failed",
+      "twilio_connection", String(connection.id), safeTwilioConnection(connection, url.origin),
+      { ...safeTwilioConnection(updated, url.origin), service: verification.ok ? verification.service : null });
+    if (!verification.ok) return json({ error: verification.error, connection: safeTwilioConnection(updated, url.origin) }, 422);
+    return json({ ok: true, connection: safeTwilioConnection(updated, url.origin), service: verification.service });
+  }
+
+  if (url.pathname === "/v1/admin/twilio-connection" && request.method === "DELETE") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["expected_revision", "confirmation"].includes(key)) ||
+      body.confirmation !== "DISCONNECT TWILIO") return json({ error: "Explicit disconnect confirmation is required" }, 400);
+    const expectedRevision = Number(body.expected_revision);
+    const before = await env.DB.prepare(`SELECT * FROM twilio_connections WHERE workspace_id=? AND status<>'revoked' LIMIT 1`)
+      .bind(workspaceId).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Twilio is not connected" }, 404);
+    if (!Number.isInteger(expectedRevision) || expectedRevision !== Number(before.revision)) {
+      return json({ error: "Twilio connection changed since it was loaded", code: "edit_conflict" }, 409);
+    }
+    const now = new Date().toISOString(); const changeId = id("chg");
+    const wiped = await encryptWorkspaceSecret(env, workspaceId, "twilio", String(before.id),
+      `revoked_${crypto.randomUUID().replaceAll("-", "")}`);
+    const result = await env.DB.prepare(`UPDATE twilio_connections SET auth_token_prefix='revoked',auth_token_ciphertext=?,
+      status='revoked',last_error=NULL,revision=revision+1,change_id=?,updated_at=?
+      WHERE id=? AND workspace_id=? AND revision=? AND status<>'revoked'`)
+      .bind(wiped, changeId, now, before.id, workspaceId, expectedRevision).run();
+    if (!result.meta.changes) return json({ error: "Twilio connection changed since it was loaded", code: "edit_conflict" }, 409);
+    await audit(env, access, request, "twilio.connection_disconnected", "twilio_connection", String(before.id),
+      safeTwilioConnection(before, url.origin), { status: "revoked", revision: expectedRevision + 1 });
+    return json({ ok: true });
+  }
+
+  const smsConsentMatch = url.pathname.match(/^\/v1\/admin\/contacts\/([^/]+)\/sms-consent$/);
+  if (smsConsentMatch && request.method === "GET") {
+    const contact = await env.DB.prepare("SELECT id,phone FROM contacts WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, smsConsentMatch[1]).first<Record<string, unknown>>();
+    if (!contact) return json({ error: "Contact not found" }, 404);
+    const consent = await env.DB.prepare("SELECT * FROM sms_consents WHERE workspace_id=? AND contact_id=?")
+      .bind(workspaceId, contact.id).first<Record<string, unknown>>();
+    return json({ consent: safeSmsConsent(consent), phone: contact.phone, phone_is_e164: Boolean(normalizeE164(contact.phone)) });
+  }
+  if (smsConsentMatch && request.method === "PUT") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["status", "basis", "evidence", "captured_at", "if_revision"].includes(key))) {
+      return json({ error: "SMS consent contains unsupported fields" }, 400);
+    }
+    const contact = await env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, smsConsentMatch[1]).first();
+    if (!contact) return json({ error: "Contact not found" }, 404);
+    const before = await env.DB.prepare("SELECT * FROM sms_consents WHERE workspace_id=? AND contact_id=?")
+      .bind(workspaceId, smsConsentMatch[1]).first<Record<string, unknown>>();
+    if (Number(body.if_revision) !== Number(before?.revision || 0)) return json({ error: "SMS consent changed since it was loaded", code: "edit_conflict" }, 409);
+    const status = String(body.status || ""); const basis = String(body.basis || "");
+    const evidence = optionalString(body.evidence, "evidence", 1000); const capturedAt = optionalString(body.captured_at, "captured_at", 50);
+    if (!["unknown", "opted_in", "opted_out"].includes(status) ||
+      !["unknown", "express", "contractual", "inbound_request", "manual_suppression"].includes(basis) ||
+      (status === "opted_out" && basis !== "manual_suppression") ||
+      (status === "opted_in" && !["express", "contractual", "inbound_request"].includes(basis)) ||
+      (status === "unknown" && basis !== "unknown") ||
+      ((status !== "unknown") && (!evidence || !capturedAt || !Number.isFinite(Date.parse(capturedAt)) || Date.parse(capturedAt) > Date.now() + 60_000))) {
+      return json({ error: "SMS consent status, lawful basis, evidence, and capture time are inconsistent" }, 400);
+    }
+    const now = new Date().toISOString(); const consentId = before ? String(before.id) : id("smscons"); const changeId = id("chg");
+    const result = before ? await env.DB.prepare(`UPDATE sms_consents SET status=?,basis=?,evidence=?,captured_at=?,
+      provider_opt_out_type=NULL,revision=revision+1,change_id=?,created_by=?,updated_at=?
+      WHERE id=? AND workspace_id=? AND revision=? RETURNING *`).bind(status, basis, evidence, capturedAt ? new Date(capturedAt).toISOString() : null,
+        changeId, access.email, now, consentId, workspaceId, before.revision).first<Record<string, unknown>>()
+      : await env.DB.prepare(`INSERT INTO sms_consents
+        (id,workspace_id,contact_id,status,basis,evidence,captured_at,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,1,?,?,?,?) RETURNING *`).bind(consentId, workspaceId, smsConsentMatch[1], status, basis,
+          evidence, capturedAt ? new Date(capturedAt).toISOString() : null, changeId, access.email, now, now).first<Record<string, unknown>>();
+    if (!result) return json({ error: "SMS consent changed since it was loaded", code: "edit_conflict" }, 409);
+    await audit(env, access, request, "sms.consent_updated", "sms_consent", consentId, before || null, safeSmsConsent(result));
+    return json({ consent: safeSmsConsent(result) });
+  }
+
+  if (url.pathname === "/v1/admin/sms/send" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["contact_id", "template", "purpose", "idempotency_key", "confirmation"].includes(key))) {
+      return json({ error: "SMS send contains unsupported fields" }, 400);
+    }
+    if (body.confirmation !== "SEND SMS") return json({ error: "Explicit SMS send confirmation is required" }, 400);
+    const contactId = String(body.contact_id || ""); const template = optionalString(body.template, "template", 1600) || "";
+    const purpose = String(body.purpose || ""); const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!/^con_[a-f0-9]{32}$/.test(contactId) || !template || !["transactional", "marketing"].includes(purpose) ||
+      !/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) return json({ error: "A contact, template, purpose, and valid idempotency key are required" }, 400);
+    const [contact, consent, connection] = await Promise.all([
+      env.DB.prepare("SELECT * FROM contacts WHERE workspace_id=? AND id=?").bind(workspaceId, contactId).first<Record<string, unknown>>(),
+      env.DB.prepare("SELECT * FROM sms_consents WHERE workspace_id=? AND contact_id=?").bind(workspaceId, contactId).first<Record<string, unknown>>(),
+      env.DB.prepare("SELECT * FROM twilio_connections WHERE workspace_id=? AND status='active' LIMIT 1").bind(workspaceId).first<Record<string, unknown>>(),
+    ]);
+    if (!contact) return json({ error: "Contact not found" }, 404);
+    if (!connection) return json({ error: "A verified Twilio connection is required" }, 409);
+    const phone = normalizeE164(contact.phone); if (!phone) return json({ error: "Contact phone must be stored in E.164 format" }, 422);
+    if (!consent || consent.status !== "opted_in" || (purpose === "marketing" && consent.basis !== "express")) {
+      return json({ error: purpose === "marketing" ? "Marketing SMS requires current express consent" : "SMS requires current contact permission", code: "sms_consent_required" }, 422);
+    }
+    const rendered = await resolveContactTemplate(env, workspaceId, contact, template, 1600);
+    const requestHash = await sha256(JSON.stringify({ contract: "twilio-sms:v1", connection_id: connection.id,
+      connection_revision: connection.revision, contact_id: contactId, to: phone, purpose, template, rendered }));
+    const existingMessage = await env.DB.prepare("SELECT * FROM sms_messages WHERE workspace_id=? AND idempotency_key=?")
+      .bind(workspaceId, idempotencyKey).first<Record<string, unknown>>();
+    if (existingMessage) {
+      if (existingMessage.request_hash !== requestHash) return json({ error: "Idempotency key was already used for a different SMS" }, 409);
+      if (["accepted", "queued", "sending", "sent", "delivered"].includes(String(existingMessage.status))) return json({ ok: true, replayed: true, message: safeSmsMessage(existingMessage) });
+      return json({ error: "This SMS already has a terminal or uncertain attempt; use a new idempotency key only after reviewing provider logs", message: safeSmsMessage(existingMessage) }, 409);
+    }
+    const recent = await env.DB.prepare(`SELECT COUNT(*) total FROM sms_messages WHERE workspace_id=? AND direction='outbound'
+      AND created_at>=? AND status NOT IN ('failed')`).bind(workspaceId, new Date(Date.now() - 3_600_000).toISOString()).first<{ total: number }>();
+    if (Number(recent?.total || 0) >= 50) return json({ error: "Workspace SMS send limit reached; try again later" }, 429);
+    const thread = await env.DB.prepare("SELECT * FROM sms_threads WHERE workspace_id=? AND participant_phone=?")
+      .bind(workspaceId, phone).first<Record<string, unknown>>();
+    const now = new Date().toISOString(); const threadId = thread ? String(thread.id) : id("smst"); const messageId = id("sms");
+    const statements: D1PreparedStatement[] = [];
+    if (!thread) statements.push(env.DB.prepare(`INSERT INTO sms_threads
+      (id,workspace_id,connection_id,contact_id,participant_phone,status,last_message_at,unread_count,revision,change_id,created_at,updated_at)
+      VALUES(?,?,?,?,?,'open',?,0,1,?,?,?)`).bind(threadId, workspaceId, connection.id, contactId, phone, now, id("chg"), now, now));
+    else statements.push(env.DB.prepare(`UPDATE sms_threads SET contact_id=?,connection_id=?,status='open',last_message_at=?,
+      revision=revision+1,change_id=?,updated_at=? WHERE id=? AND workspace_id=?`).bind(contactId, connection.id, now, id("chg"), now, threadId, workspaceId));
+    statements.push(env.DB.prepare(`INSERT INTO sms_messages
+      (id,workspace_id,connection_id,thread_id,contact_id,direction,idempotency_key,request_hash,from_phone,to_phone,
+       body_template,body_text,purpose,status,sent_by,occurred_at,created_at,updated_at)
+      VALUES(?,?,?,?,?,'outbound',?,?, '',?,?,?,?, 'pending',?,?,?,?)`).bind(messageId, workspaceId, connection.id, threadId,
+        contactId, idempotencyKey, requestHash, phone, template, rendered, purpose, access.email, now, now, now));
+    statements.push(await auditStatement(env, access, request, "sms.message_queued", "sms_message", messageId, null,
+      { contact_id: contactId, thread_id: threadId, to_phone: phone, purpose, consent_revision: consent.revision }));
+    try { await env.DB.batch(statements); } catch { return json({ error: "SMS could not be initialized", code: "sms_idempotency_conflict" }, 409); }
+    let provider: Awaited<ReturnType<typeof twilioProviderSend>>;
+    try { provider = await twilioProviderSend(env, connection, { to: phone, body: rendered,
+      statusCallback: `${url.origin}/v1/hooks/twilio/status/${String(connection.id)}` }); }
+    catch { provider = { ok: false, status: 0, error: "Twilio could not be reached; delivery state is unknown", errorCode: null }; }
+    const completedAt = new Date().toISOString();
+    if (!provider.ok) {
+      const uncertain = provider.status === 0; const nextStatus = uncertain ? "unknown" : "failed";
+      await env.DB.batch([
+        env.DB.prepare("UPDATE sms_messages SET status=?,error_code=?,error=?,updated_at=? WHERE id=? AND workspace_id=? AND status='pending'")
+          .bind(nextStatus, provider.errorCode, provider.error, completedAt, messageId, workspaceId),
+        await auditStatement(env, access, request, uncertain ? "sms.delivery_unknown" : "sms.delivery_failed", "sms_message", messageId,
+          null, { status: nextStatus, error_code: provider.errorCode, error: provider.error }),
+      ]);
+      return json({ error: provider.error, code: uncertain ? "sms_delivery_unknown" : "sms_provider_rejected" }, uncertain ? 502 : 422);
+    }
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE sms_messages SET provider_message_sid=?,from_phone=?,status=?,provider_status_at=?,updated_at=?
+        WHERE id=? AND workspace_id=? AND status='pending'`).bind(provider.providerMessageSid, normalizeE164(provider.from) || "",
+          provider.messageStatus, completedAt, completedAt, messageId, workspaceId),
+      await auditStatement(env, access, request, "sms.provider_accepted", "sms_message", messageId, null,
+        { provider_message_sid: provider.providerMessageSid, status: provider.messageStatus }),
+    ]);
+    const completed = await env.DB.prepare("SELECT * FROM sms_messages WHERE id=? AND workspace_id=?")
+      .bind(messageId, workspaceId).first<Record<string, unknown>>();
+    return json({ ok: true, replayed: false, message: safeSmsMessage(completed || {}) }, 201);
+  }
+
+  if (url.pathname === "/v1/admin/sms/threads" && request.method === "GET") {
+    const threads = await env.DB.prepare(`SELECT t.*,TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
+      sc.id consent_id,sc.status consent_status,sc.basis consent_basis,sc.evidence consent_evidence,
+      sc.captured_at consent_captured_at,sc.provider_opt_out_type consent_provider_opt_out_type,
+      sc.revision consent_revision,sc.updated_at consent_updated_at
+      FROM sms_threads t LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
+      LEFT JOIN sms_consents sc ON sc.workspace_id=t.workspace_id AND sc.contact_id=t.contact_id
+      WHERE t.workspace_id=? ORDER BY t.last_message_at DESC,t.id DESC LIMIT 100`).bind(workspaceId).all<Record<string, unknown>>();
+    return json({ threads: threads.results.map(safeSmsThread), limit: 100 });
+  }
+  const smsThreadMatch = url.pathname.match(/^\/v1\/admin\/sms\/threads\/(smst_[a-f0-9]{32})$/);
+  if (smsThreadMatch && request.method === "GET") {
+    const thread = await env.DB.prepare(`SELECT t.*,TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) contact_name,
+      sc.id consent_id,sc.status consent_status,sc.basis consent_basis,sc.evidence consent_evidence,
+      sc.captured_at consent_captured_at,sc.provider_opt_out_type consent_provider_opt_out_type,
+      sc.revision consent_revision,sc.updated_at consent_updated_at
+      FROM sms_threads t LEFT JOIN contacts c ON c.workspace_id=t.workspace_id AND c.id=t.contact_id
+      LEFT JOIN sms_consents sc ON sc.workspace_id=t.workspace_id AND sc.contact_id=t.contact_id
+      WHERE t.workspace_id=? AND t.id=?`).bind(workspaceId, smsThreadMatch[1]).first<Record<string, unknown>>();
+    if (!thread) return json({ error: "SMS thread not found" }, 404);
+    const messages = await env.DB.prepare("SELECT * FROM sms_messages WHERE workspace_id=? AND thread_id=? ORDER BY occurred_at,id LIMIT 500")
+      .bind(workspaceId, smsThreadMatch[1]).all<Record<string, unknown>>();
+    return json({ thread: safeSmsThread(thread), messages: messages.results.map(safeSmsMessage), limit: 500 });
+  }
+  if (smsThreadMatch && request.method === "PATCH") {
+    const body = await readJson(request); const status = String(body.status || ""); const expectedRevision = Number(body.expected_revision);
+    if (Object.keys(body).some((key) => !["status", "expected_revision"].includes(key)) || !["open", "closed"].includes(status) || !Number.isInteger(expectedRevision)) {
+      return json({ error: "A valid thread status and expected_revision are required" }, 400);
+    }
+    const before = await env.DB.prepare("SELECT * FROM sms_threads WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, smsThreadMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "SMS thread not found" }, 404);
+    const now = new Date().toISOString(); const changeId = id("chg");
+    const result = await env.DB.prepare(`UPDATE sms_threads SET status=?,unread_count=0,revision=revision+1,change_id=?,updated_at=?
+      WHERE workspace_id=? AND id=? AND revision=? RETURNING *`).bind(status, changeId, now, workspaceId, smsThreadMatch[1], expectedRevision)
+      .first<Record<string, unknown>>();
+    if (!result) return json({ error: "SMS thread changed since it was loaded", code: "edit_conflict" }, 409);
+    await audit(env, access, request, "sms.thread_updated", "sms_thread", smsThreadMatch[1], before, result);
+    return json({ thread: safeSmsThread(result) });
+  }
+
   if (url.pathname === "/v1/admin/page-layouts" && request.method === "GET") {
     const layouts = await Promise.all((["contact", "company", "opportunity"] as CustomFieldObject[])
       .map((objectType) => effectivePageLayout(env, workspaceId, objectType)));
@@ -7983,6 +8680,100 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       ...definition, options: parseStringArray(definition.options),
       required: Boolean(definition.required), active: Boolean(definition.active),
     })), current_user: { role: access.role }, limits: { active_fields: 50, select_options: 50 } });
+  }
+
+  if (url.pathname === "/v1/admin/custom-values" && request.method === "GET") {
+    const includeArchived = isWorkspaceAdmin(access) && url.searchParams.get("include_archived") === "1";
+    const values = await env.DB.prepare(`SELECT id,value_key,label,value,folder,active,revision,change_id,created_by,created_at,updated_at
+      FROM crm_custom_values WHERE workspace_id=? AND (?=1 OR active=1)
+      ORDER BY active DESC,COALESCE(folder,''),label COLLATE NOCASE,id`)
+      .bind(workspaceId, includeArchived ? 1 : 0).all<Record<string, unknown>>();
+    return json({
+      values: values.results.map((item) => ({
+        ...item, active: Boolean(item.active), token: `{{custom_values.${String(item.value_key)}}}`,
+      })),
+      limits: { active_values: 200, value_characters: 5000 },
+      security: "Custom values are visible to workspace members and must never contain passwords, tokens, or credentials.",
+    });
+  }
+
+  if (url.pathname === "/v1/admin/custom-values" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["value_key", "label", "value", "folder"].includes(key))) {
+      return json({ error: "Unsupported custom-value field" }, 400);
+    }
+    const valueKey = String(body.value_key || "").trim().toLowerCase();
+    const label = optionalString(body.label, "label", 80);
+    const value = typeof body.value === "string" ? body.value.trim() : "";
+    const folder = optionalString(body.folder, "folder", 80);
+    if (!/^[a-z][a-z0-9_]{1,59}$/.test(valueKey)) {
+      return json({ error: "Value key must use 2-60 lowercase letters, numbers, or underscores" }, 400);
+    }
+    if (/(?:^|_)(?:secret|password|token|credential|api_key|private_key)(?:_|$)/.test(valueKey)) {
+      return json({ error: "Custom values cannot be used to store secrets or credentials" }, 400);
+    }
+    if (!label || !value || value.length > 5000 || value.includes("{{") || value.includes("}}")) {
+      return json({ error: "Label and literal value are required; values cannot exceed 5,000 characters or contain nested variables" }, 400);
+    }
+    const count = await env.DB.prepare("SELECT COUNT(*) total FROM crm_custom_values WHERE workspace_id=? AND active=1")
+      .bind(workspaceId).first<{ total: number }>();
+    if (Number(count?.total || 0) >= 200) return json({ error: "Active custom-value limit reached" }, 409);
+    const now = new Date().toISOString();
+    const customValue = {
+      id: id("cval"), workspace_id: workspaceId, value_key: valueKey, label, value, folder,
+      active: 1, revision: 1, change_id: id("chg"), created_by: access.email, created_at: now, updated_at: now,
+    };
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO crm_custom_values
+          (id,workspace_id,value_key,label,value,folder,active,revision,change_id,created_by,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,1,1,?,?,?,?)`)
+          .bind(customValue.id, workspaceId, valueKey, label, value, folder, customValue.change_id, access.email, now, now),
+        await auditStatement(env, access, request, "custom_value.created", "crm_custom_value", customValue.id, null,
+          { ...customValue, token: `{{custom_values.${valueKey}}}` }),
+      ]);
+    } catch {
+      return json({ error: "A custom value with this key already exists" }, 409);
+    }
+    return json({ value: { ...customValue, active: true, token: `{{custom_values.${valueKey}}}` } }, 201);
+  }
+
+  const customValueMatch = url.pathname.match(/^\/v1\/admin\/custom-values\/(cval_[a-f0-9]{32})$/);
+  if (customValueMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => !["label", "value", "folder", "active", "if_revision"].includes(key))) {
+      return json({ error: "Unsupported custom-value update" }, 400);
+    }
+    const before = await env.DB.prepare("SELECT * FROM crm_custom_values WHERE workspace_id=? AND id=?")
+      .bind(workspaceId, customValueMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Custom value not found" }, 404);
+    if (body.if_revision !== before.revision) return json({ error: "Custom value changed since it was loaded", code: "edit_conflict" }, 409);
+    const label = body.label === undefined ? String(before.label) : optionalString(body.label, "label", 80);
+    const value = body.value === undefined ? String(before.value) : typeof body.value === "string" ? body.value.trim() : "";
+    const folder = body.folder === undefined ? before.folder : optionalString(body.folder, "folder", 80);
+    const active = body.active === undefined ? Number(before.active) : body.active === true ? 1 : body.active === false ? 0 : -1;
+    if (!label || !value || value.length > 5000 || value.includes("{{") || value.includes("}}") || active < 0) {
+      return json({ error: "Invalid custom-value update" }, 400);
+    }
+    if (!Number(before.active) && active) {
+      const count = await env.DB.prepare("SELECT COUNT(*) total FROM crm_custom_values WHERE workspace_id=? AND active=1")
+        .bind(workspaceId).first<{ total: number }>();
+      if (Number(count?.total || 0) >= 200) return json({ error: "Active custom-value limit reached" }, 409);
+    }
+    const now = new Date().toISOString();
+    const changeId = id("chg");
+    const after = { ...before, label, value, folder, active, revision: Number(before.revision) + 1, change_id: changeId, updated_at: now };
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE crm_custom_values SET label=?,value=?,folder=?,active=?,revision=revision+1,change_id=?,updated_at=?
+        WHERE workspace_id=? AND id=? AND revision=?`)
+        .bind(label, value, folder, active, changeId, now, workspaceId, customValueMatch[1], before.revision),
+      await auditStatement(env, access, request, active ? "custom_value.updated" : "custom_value.archived",
+        "crm_custom_value", customValueMatch[1], before, after),
+    ]);
+    if (!results[0].meta.changes) return json({ error: "Custom value changed since it was loaded", code: "edit_conflict" }, 409);
+    return json({ value: { ...after, active: Boolean(active), token: `{{custom_values.${String(before.value_key)}}}` } });
   }
 
   if (url.pathname === "/v1/admin/custom-fields" && request.method === "POST") {
@@ -9199,6 +9990,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM estimate_responses WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM estimate_versions WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM estimates WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM sms_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM marketing_campaign_recipients WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM marketing_campaign_versions WHERE workspace_id=?").bind(workspaceId),
@@ -9230,6 +10022,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM deals WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM activities WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM saved_views WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM crm_custom_values WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM contacts WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM company_redirects WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM companies WHERE workspace_id=?").bind(workspaceId),
@@ -10100,8 +10893,10 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const firstName = optionalString(body.first_name, "first_name", 100);
     const lastName = optionalString(body.last_name, "last_name", 100);
     const company = optionalString(body.company, "company", 200);
-    const phone = optionalString(body.phone, "phone", 50);
+    const suppliedPhone = optionalString(body.phone, "phone", 50);
+    const phone = suppliedPhone ? normalizeE164(suppliedPhone) : null;
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return json({ error: "A valid email is required" }, 400);
+    if (suppliedPhone && !phone) return json({ error: "phone must use E.164 format" }, 400);
     const contactId = id("con");
     const now = new Date().toISOString();
     const companyRecord = company ? await companyIdentity(env, workspaceId, company, now) : null;
@@ -11052,9 +11847,11 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const stage = body.stage === undefined ? null : optionalString(body.stage, "stage", 30);
     const status = body.status === undefined ? null : optionalString(body.status, "status", 30);
     const owner = body.owner === undefined ? null : optionalString(body.owner, "owner", 254);
+    const suppliedPhone = body.phone === undefined ? null : optionalString(body.phone, "phone", 50);
+    const phone = suppliedPhone ? normalizeE164(suppliedPhone) : null;
     const followUp = body.next_follow_up_at === undefined ? null : optionalString(body.next_follow_up_at, "next_follow_up_at", 50);
     const expectedUpdatedAt = body.if_updated_at === undefined ? null : optionalString(body.if_updated_at, "if_updated_at", 50);
-    for (const fieldName of ["stage", "status", "owner", "next_follow_up_at"] as const) {
+    for (const fieldName of ["stage", "status", "phone", "owner", "next_follow_up_at"] as const) {
       if (body[fieldName] !== undefined) {
         const fieldDenied = await requireWorkspaceGrant(env, access, "contact", "update_field", fieldName);
         if (fieldDenied) return fieldDenied;
@@ -11062,6 +11859,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     }
     if (stage && !allowedStages.has(stage)) return json({ error: "Invalid stage" }, 400);
     if (status && !allowedStatuses.has(status)) return json({ error: "Invalid status" }, 400);
+    if (suppliedPhone && !phone) return json({ error: "phone must use E.164 format" }, 400);
     if (body.custom_fields !== undefined && !isPlainObject(body.custom_fields)) return json({ error: "custom_fields must be an object" }, 400);
     if (body.custom_fields !== undefined) {
       for (const fieldName of Object.keys(body.custom_fields)) {
@@ -11069,7 +11867,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
         if (fieldDenied) return fieldDenied;
       }
     }
-    if (!stage && !status && body.owner === undefined && body.next_follow_up_at === undefined && body.custom_fields === undefined) return json({ error: "No supported fields supplied" }, 400);
+    if (!stage && !status && body.phone === undefined && body.owner === undefined && body.next_follow_up_at === undefined && body.custom_fields === undefined) return json({ error: "No supported fields supplied" }, 400);
     const before = await env.DB.prepare("SELECT * FROM contacts WHERE workspace_id=? AND id=?")
       .bind(workspaceId, contactMatch[1]).first<Record<string, unknown>>();
     if (!before) return json({ error: "Contact not found" }, 404);
@@ -11081,6 +11879,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const updatedAt = new Date(Math.max(Date.now(), Date.parse(String(before.updated_at)) + 1)).toISOString();
     const after = {
       ...before, stage: stage || before.stage, status: status || before.status,
+      phone: body.phone === undefined ? before.phone : phone,
       owner: body.owner === undefined ? before.owner : owner,
       next_follow_up_at: body.next_follow_up_at === undefined ? before.next_follow_up_at : followUp,
       custom_fields: body.custom_fields === undefined ? before.custom_fields : nextCustomFields,
@@ -11090,11 +11889,13 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const result = await env.DB.batch([
       env.DB.prepare(`UPDATE contacts SET
         stage=COALESCE(?,stage),status=COALESCE(?,status),
+        phone=CASE WHEN ?=1 THEN ? ELSE phone END,
         owner=CASE WHEN ?=1 THEN ? ELSE owner END,
         next_follow_up_at=CASE WHEN ?=1 THEN ? ELSE next_follow_up_at END,
         custom_fields=CASE WHEN ?=1 THEN ? ELSE custom_fields END,
         updated_at=? WHERE workspace_id=? AND id=? AND updated_at=?`)
-        .bind(stage, status, body.owner === undefined ? 0 : 1, owner,
+        .bind(stage, status, body.phone === undefined ? 0 : 1, phone,
+          body.owner === undefined ? 0 : 1, owner,
           body.next_follow_up_at === undefined ? 0 : 1, followUp,
           body.custom_fields === undefined ? 0 : 1, nextCustomFields, updatedAt,
           workspaceId, contactMatch[1], originalUpdatedAt),
@@ -11109,7 +11910,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       { custom_fields: nextCustomFields },
       readableContactFields,
     ).custom_fields;
-    return json({ ok: true, updated_at: updatedAt, custom_fields: visibleCustomFields });
+    return json({ ok: true, updated_at: updatedAt, custom_fields: visibleCustomFields, phone: after.phone });
   }
 
   const noteMatch = url.pathname.match(/^\/v1\/admin\/contacts\/([^/]+)\/notes$/);
@@ -11576,7 +12377,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       .filter((key) => viewReadableKeys === null || viewReadableKeys.has(key)));
     const automationHealth = await Promise.all(automations.results.map(async (automation) => ({
       ...automation,
-      ...(await automationDefinitionHealth(automation, automationDefinitions.results)),
+      ...(await automationDefinitionHealth(env, automation, automationDefinitions.results)),
     })));
     return json({
       workspace, role: access.role, current_user: { email: access.email, role: access.role },
@@ -12058,7 +12859,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
         .bind(workspaceId).all<CustomFieldDefinition>(),
     ]);
     const retryHealth = retryRule
-      ? await automationDefinitionHealth(retryRule, retryDefinitions.results)
+      ? await automationDefinitionHealth(env, retryRule, retryDefinitions.results)
       : { metadata_status: "blocked", metadata_error: "Workflow no longer exists" };
     if (retryHealth.metadata_status === "blocked") {
       return json({ error: retryHealth.metadata_error, code: "workflow_metadata_drift" }, 409);
@@ -12149,7 +12950,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     if (!record) return json({ error: `${recordType === "contact" ? "Lead" : "Opportunity"} not found` }, 404);
     const currentDefinitions = await env.DB.prepare(`SELECT * FROM custom_field_definitions
       WHERE workspace_id=? AND active=1`).bind(workspaceId).all<CustomFieldDefinition>();
-    const health = await automationDefinitionHealth(rule, currentDefinitions.results);
+    const health = await automationDefinitionHealth(env, rule, currentDefinitions.results);
     if (health.metadata_status === "blocked") {
       return json({ error: health.metadata_error, code: "workflow_metadata_drift" }, 409);
     }
@@ -13404,7 +14205,7 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const requestedScopes = jsonArray(body.scopes, "scopes", 10);
     const allowedAgentScopes = new Set([
       "crm:summary:read", "crm:companies:read", "crm:contacts:read", "crm:opportunities:read",
-      "crm:automations:read", "crm:visitor-intent:read", "crm:visitor-intent:propose",
+      "crm:automations:read", "crm:custom-values:read", "crm:visitor-intent:read", "crm:visitor-intent:propose",
       "crm:visitor-research:execute", "crm:propose",
     ]);
     if (requestedScopes.includes("crm:read")) {
