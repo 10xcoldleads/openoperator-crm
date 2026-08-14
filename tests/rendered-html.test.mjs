@@ -80,6 +80,34 @@ test("ships a functional responsive secure forms surface", async () => {
   assert.match(migration, /form_versions_form_version_unique/);
 });
 
+test("ships a private immutable estimate surface with retry-safe receipt evidence", async () => {
+  const [dashboard, workspace, recipient, page, styles, migration] = await Promise.all([
+    readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/EstimatesWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/estimate/EstimateClient.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/estimate/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0056_estimates.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /id: "estimates", label: "Estimates"/);
+  assert.match(dashboard, /<EstimatesWorkspace active=\{activeView === "estimates"/);
+  assert.match(workspace, /PUBLISH ESTIMATE/);
+  assert.match(workspace, /REVOKE ESTIMATE/);
+  assert.match(workspace, /automatic delivery is included/i);
+  assert.match(workspace, /crypto\.randomUUID\(\)\.replaceAll/);
+  assert.match(recipient, /history\.replaceState\(null, "", "\/estimate"\)/);
+  assert.match(recipient, /idempotencyKey = useRef\(crypto\.randomUUID\(\)\)/);
+  assert.match(recipient, /idempotency_key: idempotencyKey\.current/);
+  assert.match(recipient, /privacy_accepted: false/);
+  assert.match(recipient, /className="estimate-honeypot"/);
+  assert.match(recipient, /not sign a contract, accept legal terms, or\s+authorize payment/i);
+  assert.match(page, /robots: \{ index: false, follow: false \}/);
+  assert.match(styles, /\.estimates-workspace/);
+  assert.match(styles, /\.public-estimate/);
+  assert.match(migration, /estimate_versions_immutable_update/);
+  assert.match(migration, /estimate_responses_immutable_update/);
+});
+
 test("ships governed first-party review requests and private feedback", async () => {
   const [dashboard, workspace, feedback, unsubscribe, styles, migration] = await Promise.all([
     readFile(new URL("../app/CrmDashboard.tsx", import.meta.url), "utf8"),

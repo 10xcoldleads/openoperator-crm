@@ -93,6 +93,7 @@ function usesIndependentCredential(pathname: string): boolean {
     /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(pathname) ||
     pathname === "/v1/public/marketing/unsubscribe" || pathname === "/unsubscribe" ||
     pathname === "/v1/public/reviews/session" || pathname === "/v1/public/reviews/feedback" || pathname === "/feedback" ||
+    pathname === "/v1/public/estimates/session" || pathname === "/v1/public/estimates/respond" || pathname === "/estimate" ||
     /^\/v1\/public\/booking\/[a-z0-9][a-z0-9-]{2,79}(?:\/appointments)?$/.test(pathname) ||
     pathname === "/v1/public/appointments/manage" ||
     /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(pathname) ||
@@ -232,7 +233,7 @@ const MAX_IMPORT_ROWS = 100;
 const MAX_RECOVERY_PLAINTEXT_BYTES = 1_000_000;
 const RECOVERY_FORMAT = "openoperator.workspace-backup";
 const RECOVERY_VERSION = 1;
-const RECOVERY_SCHEMA_VERSION = 32;
+const RECOVERY_SCHEMA_VERSION = 33;
 type RecoveryTable =
   | "pipelines" | "pipeline_stages" | "companies" | "company_redirects" | "contacts" | "activities" | "deals" | "notes" | "company_notes"
   | "custom_field_definitions"
@@ -247,6 +248,7 @@ type RecoveryTable =
   | "sites" | "site_versions"
   | "marketing_campaigns" | "marketing_campaign_versions" | "marketing_campaign_recipients"
   | "review_destinations" | "review_requests" | "review_feedback"
+  | "estimates" | "estimate_versions" | "estimate_responses"
   | "booking_calendars" | "booking_availability_rules" | "booking_appointments"
   | "payment_ledger_entries";
 type RecoverySpec = { columns: string[] };
@@ -295,6 +297,9 @@ const recoverySpecs: Record<RecoveryTable, RecoverySpec> = {
   review_destinations: { columns: ["id", "workspace_id", "name", "business_name", "review_url", "status", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   review_requests: { columns: ["id", "workspace_id", "destination_id", "contact_id", "email", "first_name", "business_name", "review_url", "subject", "body_text", "feedback_token_hash", "unsubscribe_token_hash", "status", "attempt_count", "provider_email_id", "response_status", "error", "sent_at", "created_by", "created_at", "updated_at"] },
   review_feedback: { columns: ["id", "workspace_id", "request_id", "idempotency_key", "rating", "feedback", "privacy_text", "ip_hash", "user_agent", "submitted_at"] },
+  estimates: { columns: ["id", "workspace_id", "contact_id", "opportunity_id", "estimate_number", "title", "seller_name", "seller_email", "currency", "expires_on", "notes", "line_items", "subtotal_minor", "status", "published_version_id", "revision", "change_id", "created_by", "created_at", "updated_at"] },
+  estimate_versions: { columns: ["id", "workspace_id", "estimate_id", "version", "estimate_number", "title", "seller_name", "seller_email", "recipient_name", "recipient_email", "currency", "expires_on", "notes", "line_items", "subtotal_minor", "access_token_hash", "published_by", "published_at"] },
+  estimate_responses: { columns: ["id", "workspace_id", "estimate_id", "version_id", "idempotency_key", "decision", "typed_name", "note", "privacy_text", "ip_hash", "user_agent", "submitted_at"] },
   booking_calendars: { columns: ["id", "workspace_id", "name", "slug", "status", "title", "description", "timezone", "duration_minutes", "buffer_before_minutes", "buffer_after_minutes", "minimum_notice_minutes", "maximum_days_ahead", "revision", "change_id", "created_by", "created_at", "updated_at"] },
   booking_availability_rules: { columns: ["id", "workspace_id", "calendar_id", "day_of_week", "start_minute", "end_minute", "created_at"] },
   booking_appointments: { columns: ["id", "workspace_id", "calendar_id", "contact_id", "idempotency_key", "name", "email", "phone", "visitor_timezone", "starts_at", "ends_at", "status", "manage_token_hash", "external_provider", "external_event_id", "sync_status", "cancelled_at", "cancellation_reason", "revision", "change_id", "created_at", "updated_at"] },
@@ -2014,6 +2019,7 @@ function privateAllowedMethods(pathname: string): string[] | null {
     "/v1/admin/marketing-campaigns": ["GET", "POST"],
     "/v1/admin/review-destinations": ["GET", "POST"],
     "/v1/admin/review-requests": ["GET", "POST"],
+    "/v1/admin/estimates": ["GET", "POST"],
     "/v1/admin/booking-calendars": ["GET", "POST"],
     "/v1/admin/reports/revenue-funnel": ["GET"],
     "/v1/admin/payments/ledger": ["GET", "POST"],
@@ -2030,6 +2036,8 @@ function privateAllowedMethods(pathname: string): string[] | null {
     [/^\/v1\/admin\/marketing-campaigns\/mkt_[a-f0-9]{32}\/(publish|launch|retry|cancel)$/, ["POST"]],
     [/^\/v1\/admin\/review-destinations\/revdest_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/review-requests\/revreq_[a-f0-9]{32}\/retry$/, ["POST"]],
+    [/^\/v1\/admin\/estimates\/est_[a-f0-9]{32}$/, ["PATCH"]],
+    [/^\/v1\/admin\/estimates\/est_[a-f0-9]{32}\/(publish|revoke)$/, ["POST"]],
     [/^\/v1\/admin\/custom-fields\/cfld_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}$/, ["PATCH"]],
     [/^\/v1\/admin\/custom-objects\/cobj_[a-f0-9]{32}\/views$/, ["GET", "POST"]],
@@ -2489,6 +2497,36 @@ async function validateRecoveryRows(env: FrameworkEnv, workspaceId: string, rawT
     requireReference("review_requests", row, "contact_id", "contacts");
   }
   for (const row of tables.review_feedback) requireReference("review_feedback", row, "request_id", "review_requests");
+  for (const row of tables.estimate_versions) requireReference("estimate_versions", row, "estimate_id", "estimates");
+  for (const row of tables.estimates) {
+    requireReference("estimates", row, "contact_id", "contacts");
+    requireReference("estimates", row, "opportunity_id", "opportunities", true);
+    requireReference("estimates", row, "published_version_id", "estimate_versions", true);
+  }
+  for (const row of tables.estimate_responses) {
+    requireReference("estimate_responses", row, "estimate_id", "estimates");
+    requireReference("estimate_responses", row, "version_id", "estimate_versions");
+  }
+  const estimateNumbers = new Set<string>(); const estimateHashes = new Set<string>(); const estimateResponses = new Set<string>(); const estimateReplay = new Set<string>();
+  for (const row of tables.estimates) {
+    let calculated: { subtotal: number }; try { calculated = validateEstimateLineItems(JSON.parse(String(row.line_items))); } catch { throw new ApiError(400, "Backup contains invalid estimate line items"); }
+    if (estimateNumbers.has(String(row.estimate_number)) || !/^[A-Z0-9-]{3,40}$/.test(String(row.estimate_number)) || !validEmail(normalizeEmail(String(row.seller_email))) ||
+      !/^[A-Z]{3}$/.test(String(row.currency)) || !["draft", "published", "revoked"].includes(String(row.status)) || calculated.subtotal !== Number(row.subtotal_minor) ||
+      !Number.isInteger(row.revision) || Number(row.revision) < 1 || (row.expires_on !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(row.expires_on)))) throw new ApiError(400, "Backup contains an invalid estimate");
+    estimateNumbers.add(String(row.estimate_number));
+  }
+  for (const row of tables.estimate_versions) {
+    let calculated: { subtotal: number }; try { calculated = validateEstimateLineItems(JSON.parse(String(row.line_items))); } catch { throw new ApiError(400, "Backup contains invalid estimate version items"); }
+    if (estimateHashes.has(String(row.access_token_hash)) || !/^[a-f0-9]{64}$/.test(String(row.access_token_hash)) || !validEmail(normalizeEmail(String(row.seller_email))) ||
+      !validEmail(normalizeEmail(String(row.recipient_email))) || !/^[A-Z]{3}$/.test(String(row.currency)) || calculated.subtotal !== Number(row.subtotal_minor) ||
+      !Number.isInteger(row.version) || Number(row.version) < 1) throw new ApiError(400, "Backup contains an invalid estimate version");
+    estimateHashes.add(String(row.access_token_hash));
+  }
+  for (const row of tables.estimate_responses) {
+    if (estimateResponses.has(String(row.version_id)) || estimateReplay.has(String(row.idempotency_key)) || !["acknowledged", "declined"].includes(String(row.decision)) ||
+      !/^[A-Za-z0-9._:-]{8,100}$/.test(String(row.idempotency_key)) || !String(row.typed_name).trim() || !Number.isFinite(Date.parse(String(row.submitted_at)))) throw new ApiError(400, "Backup contains an invalid estimate response");
+    estimateResponses.add(String(row.version_id)); estimateReplay.add(String(row.idempotency_key));
+  }
   for (const row of tables.booking_availability_rules) requireReference("booking_availability_rules", row, "calendar_id", "booking_calendars");
   for (const row of tables.booking_appointments) {
     requireReference("booking_appointments", row, "calendar_id", "booking_calendars");
@@ -5395,6 +5433,34 @@ function safeReviewRequest(row: Record<string, unknown>) {
     sent_at: row.sent_at, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
     feedback: row.feedback_id ? { id: row.feedback_id, rating: row.rating, feedback: row.feedback, submitted_at: row.feedback_submitted_at } : null };
 }
+type EstimateLineItem = { id: string; description: string; quantity: number; unit_amount_minor: number };
+function validateEstimateLineItems(value: unknown): { items: EstimateLineItem[]; subtotal: number } {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50) throw new ApiError(400, "line_items must contain 1 to 50 items");
+  const ids = new Set<string>(); let subtotal = 0;
+  const items = value.map((raw) => {
+    if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["id", "description", "quantity", "unit_amount_minor"].includes(key))) throw new ApiError(400, "A line item is malformed");
+    const itemId = optionalString(raw.id, "line item id", 40) || ""; const description = optionalString(raw.description, "line item description", 160) || "";
+    const quantity = Number(raw.quantity); const unitAmount = Number(raw.unit_amount_minor);
+    if (!/^[a-z][a-z0-9_]{2,39}$/.test(itemId) || ids.has(itemId) || !description || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 100_000 ||
+      !Number.isSafeInteger(unitAmount) || unitAmount < 1 || unitAmount > 1_000_000_000_000 || !Number.isSafeInteger(quantity * unitAmount) || !Number.isSafeInteger(subtotal + quantity * unitAmount)) throw new ApiError(400, "A line item has invalid identity, text, quantity, or price");
+    ids.add(itemId); subtotal += quantity * unitAmount; return { id: itemId, description, quantity, unit_amount_minor: unitAmount };
+  });
+  return { items, subtotal };
+}
+function safeEstimate(row: Record<string, unknown>) {
+  return { id: row.id, contact_id: row.contact_id, opportunity_id: row.opportunity_id, estimate_number: row.estimate_number, title: row.title,
+    seller_name: row.seller_name, seller_email: row.seller_email, currency: row.currency, expires_on: row.expires_on, notes: row.notes,
+    line_items: JSON.parse(String(row.line_items)), subtotal_minor: row.subtotal_minor, status: row.status, published_version_id: row.published_version_id,
+    revision: row.revision, created_by: row.created_by, created_at: row.created_at, updated_at: row.updated_at,
+    contact_email: row.contact_email, contact_name: row.contact_name, opportunity_name: row.opportunity_name };
+}
+function safeEstimateVersion(row: Record<string, unknown>) {
+  return { id: row.id, estimate_id: row.estimate_id, version: row.version, estimate_number: row.estimate_number, title: row.title,
+    seller_name: row.seller_name, seller_email: row.seller_email, recipient_name: row.recipient_name, recipient_email: row.recipient_email,
+    currency: row.currency, expires_on: row.expires_on, notes: row.notes, line_items: JSON.parse(String(row.line_items)), subtotal_minor: row.subtotal_minor,
+    published_by: row.published_by, published_at: row.published_at };
+}
+function newEstimateAccessToken(versionId: string) { return `estlink_${versionId}_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`; }
 function unsubscribeSecret(env: FrameworkEnv) {
   if (!env.UNSUBSCRIBE_SIGNING_KEY || env.UNSUBSCRIBE_SIGNING_KEY.length < 32) throw new ApiError(503, "Unsubscribe signing is not configured");
   return env.UNSUBSCRIBE_SIGNING_KEY;
@@ -5695,6 +5761,55 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
   if (url.pathname === "/v1/health") {
     if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
     return json({ ok: true, service: "openoperator-crm", version: 1 });
+  }
+
+  if (url.pathname === "/v1/public/estimates/session") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
+    if (Object.keys(body).some((key) => key !== "token")) return json({ error: "Estimate session contains unsupported fields" }, 400);
+    const token = optionalString(body.token, "token", 180) || "";
+    if (!/^estlink_estv_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token)) return json({ error: "Estimate link is invalid" }, 400);
+    const row = await env.DB.prepare(`SELECT v.*,e.status estimate_status,r.id response_id,r.decision,r.typed_name,r.note response_note,r.submitted_at
+      FROM estimate_versions v JOIN estimates e ON e.id=v.estimate_id AND e.workspace_id=v.workspace_id
+      LEFT JOIN estimate_responses r ON r.workspace_id=v.workspace_id AND r.version_id=v.id WHERE v.access_token_hash=?`)
+      .bind(await sha256(token)).first<Record<string, unknown>>();
+    if (!row || row.estimate_status !== "published") return json({ error: "Estimate is unavailable" }, 404);
+    if (row.expires_on && Date.now() > Date.parse(`${row.expires_on}T23:59:59.999Z`)) return json({ error: "Estimate has expired", code: "estimate_expired" }, 410);
+    return json({ estimate: safeEstimateVersion(row), response: row.response_id ? { decision: row.decision, typed_name: row.typed_name, note: row.response_note, submitted_at: row.submitted_at } : null,
+      disclosure: "This acknowledgement records a customer response. It is not an electronic signature, contract execution, invoice, or payment." });
+  }
+
+  if (url.pathname === "/v1/public/estimates/respond") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+    let body: Json; try { body = await readJson(request); } catch (error) { return error instanceof ApiError ? json({ error: error.message }, error.status) : json({ error: "Invalid request" }, 400); }
+    if (Object.keys(body).some((key) => !["token", "decision", "typed_name", "note", "privacy_accepted", "idempotency_key", "website"].includes(key))) return json({ error: "Estimate response contains unsupported fields" }, 400);
+    if (typeof body.website === "string" && body.website.trim()) return json({ ok: true, accepted: true }, 202);
+    const token = optionalString(body.token, "token", 180) || ""; const decision = optionalString(body.decision, "decision", 20) || "";
+    const typedName = optionalString(body.typed_name, "typed_name", 160) || ""; const note = optionalString(body.note, "note", 2000) || "";
+    const idempotencyKey = optionalString(body.idempotency_key, "idempotency_key", 100) || "";
+    if (!/^estlink_estv_[a-f0-9]{32}_[a-f0-9]{64}$/.test(token) || !["acknowledged", "declined"].includes(decision) || !typedName || body.privacy_accepted !== true || !/^[A-Za-z0-9._:-]{8,100}$/.test(idempotencyKey)) return json({ error: "A valid link, decision, typed name, privacy acknowledgement, and idempotency key are required" }, 400);
+    const version = await env.DB.prepare(`SELECT v.*,e.status estimate_status FROM estimate_versions v JOIN estimates e ON e.id=v.estimate_id AND e.workspace_id=v.workspace_id WHERE v.access_token_hash=?`)
+      .bind(await sha256(token)).first<Record<string, unknown>>();
+    if (!version || version.estimate_status !== "published") return json({ error: "Estimate is unavailable" }, 404);
+    if (version.expires_on && Date.now() > Date.parse(`${version.expires_on}T23:59:59.999Z`)) return json({ error: "Estimate has expired", code: "estimate_expired" }, 410);
+    const existing = await env.DB.prepare("SELECT * FROM estimate_responses WHERE workspace_id=? AND version_id=?").bind(version.workspace_id, version.id).first<Record<string, unknown>>();
+    if (existing) return existing.decision === decision && existing.typed_name === typedName && String(existing.note || "") === note
+      ? json({ ok: true, duplicate: true, decision }) : json({ error: "A response was already recorded for this estimate" }, 409);
+    const ip = request.headers.get("cf-connecting-ip"); const ipHash = ip ? await sha256(`${version.workspace_id}:estimate:${ip}`) : null; const now = new Date().toISOString();
+    if (ipHash) { const recent = await env.DB.prepare("SELECT COUNT(*) total FROM estimate_responses WHERE workspace_id=? AND ip_hash=? AND submitted_at>?")
+      .bind(version.workspace_id, ipHash, new Date(Date.now() - 600_000).toISOString()).first<{ total: number }>(); if (Number(recent?.total || 0) >= 10) return json({ error: "Too many responses. Try again later." }, 429, { "retry-after": "600" }); }
+    const privacyText = "Your name, decision, and optional note are stored as private CRM data for this estimate.";
+    try { await env.DB.batch([
+      env.DB.prepare(`INSERT INTO estimate_responses(id,workspace_id,estimate_id,version_id,idempotency_key,decision,typed_name,note,privacy_text,ip_hash,user_agent,submitted_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id("estr"), version.workspace_id, version.estimate_id, version.id, idempotencyKey, decision, typedName, note || null, privacyText, ipHash, (request.headers.get("user-agent") || "").slice(0, 300) || null, now),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        VALUES(?,?,'public',?,'estimate.response_recorded','estimate',?,NULL,?,?,?)`).bind(id("audit"), version.workspace_id, typedName, version.estimate_id, JSON.stringify({ version_id: version.id, decision }), requestId(request), now),
+    ]); } catch {
+      const raced = await env.DB.prepare("SELECT decision,typed_name,note FROM estimate_responses WHERE workspace_id=? AND version_id=?").bind(version.workspace_id, version.id).first<Record<string, unknown>>();
+      if (raced && raced.decision === decision && raced.typed_name === typedName && String(raced.note || "") === note) return json({ ok: true, duplicate: true, decision });
+      return json({ error: "A response was already recorded for this estimate" }, 409);
+    }
+    return json({ ok: true, duplicate: false, decision }, 201);
   }
 
   if (url.pathname === "/v1/public/marketing/unsubscribe") {
@@ -7219,6 +7334,89 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
     const updated = await env.DB.prepare(`SELECT r.*,f.id feedback_id,f.rating,f.feedback,f.submitted_at feedback_submitted_at FROM review_requests r
       LEFT JOIN review_feedback f ON f.workspace_id=r.workspace_id AND f.request_id=r.id WHERE r.workspace_id=? AND r.id=?`).bind(workspaceId, before.id).first<Record<string, unknown>>();
     return json({ request: safeReviewRequest(updated!) });
+  }
+
+  if (url.pathname === "/v1/admin/estimates" && request.method === "GET") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const rows = await env.DB.prepare(`SELECT e.*,c.email contact_email,TRIM(COALESCE(c.first_name,'')||' '||COALESCE(c.last_name,'')) contact_name,o.name opportunity_name
+      FROM estimates e JOIN contacts c ON c.id=e.contact_id AND c.workspace_id=e.workspace_id
+      LEFT JOIN opportunities o ON o.id=e.opportunity_id AND o.workspace_id=e.workspace_id WHERE e.workspace_id=? ORDER BY e.updated_at DESC,e.id LIMIT 100`).bind(workspaceId).all<Record<string, unknown>>();
+    const versions = await env.DB.prepare("SELECT * FROM estimate_versions WHERE workspace_id=? ORDER BY published_at DESC,id").bind(workspaceId).all<Record<string, unknown>>();
+    const responses = await env.DB.prepare("SELECT id,estimate_id,version_id,decision,typed_name,note,privacy_text,submitted_at FROM estimate_responses WHERE workspace_id=? ORDER BY submitted_at DESC,id").bind(workspaceId).all();
+    const contacts = await env.DB.prepare("SELECT id,email,first_name,last_name FROM contacts WHERE workspace_id=? AND email IS NOT NULL ORDER BY LOWER(email),id LIMIT 300").bind(workspaceId).all();
+    const opportunities = await env.DB.prepare("SELECT id,contact_id,name,currency,status FROM opportunities WHERE workspace_id=? ORDER BY updated_at DESC,id LIMIT 300").bind(workspaceId).all();
+    return json({ estimates: rows.results.map(safeEstimate), versions: versions.results.map(safeEstimateVersion), responses: responses.results, links: { contacts: contacts.results, opportunities: opportunities.results },
+      boundaries: { electronic_signature: false, contract_execution: false, invoices: false, taxes: false, checkout: false, payment_provider: false, automatic_delivery: false } });
+  }
+  if (url.pathname === "/v1/admin/estimates" && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["contact_id", "opportunity_id", "title", "seller_name", "seller_email", "currency"].includes(key))) return json({ error: "Estimate contains unsupported fields" }, 400);
+    const contactId = optionalString(body.contact_id, "contact_id", 80) || ""; const opportunityId = optionalString(body.opportunity_id, "opportunity_id", 80) || null;
+    const title = optionalString(body.title, "title", 160) || ""; const sellerName = optionalString(body.seller_name, "seller_name", 160) || ""; const sellerEmail = normalizeEmail(optionalString(body.seller_email, "seller_email", 254) || "");
+    const currency = (optionalString(body.currency, "currency", 3) || "").toUpperCase();
+    if (!/^con_[a-f0-9]{32}$/.test(contactId) || (opportunityId && !/^opp_[a-f0-9]{32}$/.test(opportunityId)) || !title || !sellerName || !validEmail(sellerEmail) || !/^[A-Z]{3}$/.test(currency)) return json({ error: "A valid Contact, title, seller identity, and currency are required" }, 400);
+    const contact = await env.DB.prepare("SELECT id FROM contacts WHERE workspace_id=? AND id=?").bind(workspaceId, contactId).first(); if (!contact) return json({ error: "Contact not found" }, 404);
+    if (opportunityId && !await env.DB.prepare("SELECT 1 ok FROM opportunities WHERE workspace_id=? AND id=? AND contact_id=?").bind(workspaceId, opportunityId, contactId).first()) return json({ error: "Opportunity must belong to the selected Contact" }, 409);
+    const estimateId = id("est"); const estimateNumber = `EST-${estimateId.slice(-10).toUpperCase()}`; const now = new Date().toISOString(); const changeId = id("chg");
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO estimates(id,workspace_id,contact_id,opportunity_id,estimate_number,title,seller_name,seller_email,currency,expires_on,notes,line_items,subtotal_minor,status,revision,change_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,NULL,'','[]',0,'draft',1,?,?,?,?)`).bind(estimateId, workspaceId, contactId, opportunityId, estimateNumber, title, sellerName, sellerEmail, currency, changeId, access.email, now, now),
+      await auditStatement(env, access, request, "estimate.created", "estimate", estimateId, null, { estimate_number: estimateNumber, contact_id: contactId, opportunity_id: opportunityId }),
+    ]);
+    const created = await env.DB.prepare("SELECT * FROM estimates WHERE workspace_id=? AND id=?").bind(workspaceId, estimateId).first<Record<string, unknown>>(); return json({ estimate: safeEstimate(created!) }, 201);
+  }
+  const estimateMatch = url.pathname.match(/^\/v1\/admin\/estimates\/(est_[a-f0-9]{32})$/);
+  if (estimateMatch && request.method === "PATCH") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["contact_id", "opportunity_id", "title", "seller_name", "seller_email", "currency", "expires_on", "notes", "line_items", "if_revision"].includes(key))) return json({ error: "Estimate update contains unsupported fields" }, 400);
+    const before = await env.DB.prepare("SELECT * FROM estimates WHERE workspace_id=? AND id=?").bind(workspaceId, estimateMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Estimate not found" }, 404); if (before.status !== "draft") return json({ error: "Only a draft estimate can be edited" }, 409); if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Estimate changed since it was loaded", code: "edit_conflict" }, 409);
+    const contactId = optionalString(body.contact_id, "contact_id", 80) || String(before.contact_id); const opportunityId = body.opportunity_id === null || body.opportunity_id === "" ? null : optionalString(body.opportunity_id, "opportunity_id", 80) || before.opportunity_id as string | null;
+    const title = optionalString(body.title, "title", 160) || String(before.title); const sellerName = optionalString(body.seller_name, "seller_name", 160) || String(before.seller_name); const sellerEmail = normalizeEmail(optionalString(body.seller_email, "seller_email", 254) || String(before.seller_email));
+    const currency = (optionalString(body.currency, "currency", 3) || String(before.currency)).toUpperCase(); const expiresOn = body.expires_on === null || body.expires_on === "" ? null : optionalString(body.expires_on, "expires_on", 10) || String(before.expires_on || "");
+    const notes = body.notes === undefined ? String(before.notes) : optionalString(body.notes, "notes", 4000) || ""; const validated = validateEstimateLineItems(body.line_items === undefined ? JSON.parse(String(before.line_items)) : body.line_items);
+    if (!/^con_[a-f0-9]{32}$/.test(contactId) || (opportunityId && !/^opp_[a-f0-9]{32}$/.test(String(opportunityId))) || !title || !sellerName || !validEmail(sellerEmail) || !/^[A-Z]{3}$/.test(currency) || (expiresOn && !parseLocalDate(expiresOn))) return json({ error: "Estimate fields are invalid" }, 400);
+    if (!await env.DB.prepare("SELECT 1 ok FROM contacts WHERE workspace_id=? AND id=?").bind(workspaceId, contactId).first()) return json({ error: "Contact not found" }, 404);
+    if (opportunityId && !await env.DB.prepare("SELECT 1 ok FROM opportunities WHERE workspace_id=? AND id=? AND contact_id=?").bind(workspaceId, opportunityId, contactId).first()) return json({ error: "Opportunity must belong to the selected Contact" }, 409);
+    const now = new Date().toISOString(); const changeId = id("chg"); const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE estimates SET contact_id=?,opportunity_id=?,title=?,seller_name=?,seller_email=?,currency=?,expires_on=?,notes=?,line_items=?,subtotal_minor=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=? AND status='draft'`)
+        .bind(contactId, opportunityId, title, sellerName, sellerEmail, currency, expiresOn, notes, JSON.stringify(validated.items), validated.subtotal, changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,'estimate.updated','estimate',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM estimates WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify(safeEstimate(before)), JSON.stringify({ contact_id: contactId, opportunity_id: opportunityId, title, currency, subtotal_minor: validated.subtotal }), requestId(request), now, workspaceId, before.id, changeId),
+    ]); if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: "Estimate changed before it could be saved", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM estimates WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>(); return json({ estimate: safeEstimate(updated!) });
+  }
+  const estimateLifecycleMatch = url.pathname.match(/^\/v1\/admin\/estimates\/(est_[a-f0-9]{32})\/(publish|revoke)$/);
+  if (estimateLifecycleMatch && request.method === "POST") {
+    if (!isWorkspaceAdmin(access)) return json({ error: "Admin role required" }, 403);
+    const body = await readJson(request); if (Object.keys(body).some((key) => !["if_revision", "confirmation"].includes(key))) return json({ error: "Estimate lifecycle request contains unsupported fields" }, 400);
+    const before = await env.DB.prepare(`SELECT e.*,c.email contact_email,TRIM(COALESCE(c.first_name,'')||' '||COALESCE(c.last_name,'')) contact_name FROM estimates e JOIN contacts c ON c.id=e.contact_id AND c.workspace_id=e.workspace_id WHERE e.workspace_id=? AND e.id=?`).bind(workspaceId, estimateLifecycleMatch[1]).first<Record<string, unknown>>();
+    if (!before) return json({ error: "Estimate not found" }, 404); if (Number(body.if_revision) !== Number(before.revision)) return json({ error: "Estimate changed since it was loaded", code: "edit_conflict" }, 409);
+    const action = estimateLifecycleMatch[2]; const confirmation = action === "publish" ? "PUBLISH ESTIMATE" : "REVOKE ESTIMATE"; if (body.confirmation !== confirmation) return json({ error: `Type ${confirmation} to continue` }, 400);
+    if (action === "publish") {
+      if (before.status !== "draft") return json({ error: "Only a draft estimate can be published" }, 409); const validated = validateEstimateLineItems(JSON.parse(String(before.line_items)));
+      const recipientEmail = normalizeEmail(String(before.contact_email || "")); const recipientName = String(before.contact_name || "").trim() || recipientEmail; if (!validEmail(recipientEmail) || validated.subtotal <= 0) return json({ error: "A valid recipient email and positive estimate total are required" }, 409);
+      const versionId = id("estv"); const token = newEstimateAccessToken(versionId); const tokenHash = await sha256(token); const now = new Date().toISOString(); const changeId = id("chg");
+      const results = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO estimate_versions(id,workspace_id,estimate_id,version,estimate_number,title,seller_name,seller_email,recipient_name,recipient_email,currency,expires_on,notes,line_items,subtotal_minor,access_token_hash,published_by,published_at)
+          SELECT ?,workspace_id,id,1,estimate_number,title,seller_name,seller_email,?,?,?,?,notes,line_items,subtotal_minor,?,?,? FROM estimates WHERE workspace_id=? AND id=? AND revision=? AND status='draft'`)
+          .bind(versionId, recipientName, recipientEmail, before.currency, before.expires_on, tokenHash, access.email, now, workspaceId, before.id, before.revision),
+        env.DB.prepare("UPDATE estimates SET status='published',published_version_id=?,revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=? AND status='draft'")
+          .bind(versionId, changeId, now, workspaceId, before.id, before.revision),
+        env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+          SELECT ?,?,'user',?,'estimate.published','estimate',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM estimates WHERE workspace_id=? AND id=? AND change_id=?)`)
+          .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify({ status: "draft", revision: before.revision }), JSON.stringify({ status: "published", version_id: versionId, subtotal_minor: validated.subtotal }), requestId(request), now, workspaceId, before.id, changeId),
+      ]); if (!results.every((result) => result.meta.changes)) return json({ error: "Estimate changed before it could be published", code: "edit_conflict" }, 409);
+      const updated = await env.DB.prepare("SELECT * FROM estimates WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>(); return json({ estimate: safeEstimate(updated!), access: { public_path: `/estimate#${token}`, shown_once: true, automatic_delivery: false } });
+    }
+    if (before.status !== "published") return json({ error: "Only a published estimate can be revoked" }, 409); const now = new Date().toISOString(); const changeId = id("chg"); const results = await env.DB.batch([
+      env.DB.prepare("UPDATE estimates SET status='revoked',revision=revision+1,change_id=?,updated_at=? WHERE workspace_id=? AND id=? AND revision=? AND status='published'").bind(changeId, now, workspaceId, before.id, before.revision),
+      env.DB.prepare(`INSERT INTO audit_log(id,workspace_id,actor_type,actor_id,action,entity_type,entity_id,before_state,after_state,request_id,created_at)
+        SELECT ?,?,'user',?,'estimate.revoked','estimate',?,?,?,?,? WHERE changes()>0 AND EXISTS(SELECT 1 FROM estimates WHERE workspace_id=? AND id=? AND change_id=?)`)
+        .bind(id("audit"), workspaceId, access.email, before.id, JSON.stringify({ status: before.status }), JSON.stringify({ status: "revoked" }), requestId(request), now, workspaceId, before.id, changeId),
+    ]); if (!results[0].meta.changes || !results[1].meta.changes) return json({ error: "Estimate changed before it could be revoked", code: "edit_conflict" }, 409);
+    const updated = await env.DB.prepare("SELECT * FROM estimates WHERE workspace_id=? AND id=?").bind(workspaceId, before.id).first<Record<string, unknown>>(); return json({ estimate: safeEstimate(updated!) });
   }
 
   if (url.pathname === "/v1/admin/sites" && request.method === "GET") {
@@ -8998,6 +9196,9 @@ async function api(request: Request, env: FrameworkEnv, url: URL): Promise<Respo
       env.DB.prepare("DELETE FROM review_feedback WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM review_requests WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM review_destinations WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM estimate_responses WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM estimate_versions WHERE workspace_id=?").bind(workspaceId),
+      env.DB.prepare("DELETE FROM estimates WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM communication_consents WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM marketing_campaign_recipients WHERE workspace_id=?").bind(workspaceId),
       env.DB.prepare("DELETE FROM marketing_campaign_versions WHERE workspace_id=?").bind(workspaceId),
@@ -14530,12 +14731,12 @@ const worker = {
         if (independentlyAuthenticated) return independentlyAuthenticated;
         if ((/^\/f\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) || /^\/s\/[a-z0-9][a-z0-9-]{2,79}$/.test(url.pathname) ||
           /^\/book\/[a-z0-9][a-z0-9-]{2,79}(?:\/manage)?$/.test(url.pathname) ||
-          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname) || url.pathname === "/unsubscribe" || url.pathname === "/feedback") && request.method === "GET") {
+          /^\/site\/[a-z0-9][a-z0-9-]{2,79}(?:\/[a-z0-9][a-z0-9-]{0,58})?$/.test(url.pathname) || url.pathname === "/unsubscribe" || url.pathname === "/feedback" || url.pathname === "/estimate") && request.method === "GET") {
           const response = await handler.fetch(request, env, ctx);
           const headers = new Headers(response.headers);
           for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
           if (url.pathname.startsWith("/site/")) headers.delete("x-robots-tag");
-          headers.set("cache-control", ["/unsubscribe", "/feedback"].includes(url.pathname) ? "private, no-store" : "public, max-age=60, stale-while-revalidate=300");
+          headers.set("cache-control", ["/unsubscribe", "/feedback", "/estimate"].includes(url.pathname) ? "private, no-store" : "public, max-age=60, stale-while-revalidate=300");
           return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
         }
       }

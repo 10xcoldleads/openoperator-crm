@@ -695,6 +695,27 @@ export const bookingAppointments = sqliteTable("booking_appointments", {
   index("booking_appointments_calendar_range_idx").on(table.workspaceId, table.calendarId, table.status, table.startsAt, table.endsAt),
 ]);
 
+export const estimates = sqliteTable("estimates", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contactId: text("contact_id").notNull().references(() => contacts.id, { onDelete: "restrict" }), opportunityId: text("opportunity_id").references(() => opportunities.id, { onDelete: "restrict" }),
+  estimateNumber: text("estimate_number").notNull(), title: text("title").notNull(), sellerName: text("seller_name").notNull(), sellerEmail: text("seller_email").notNull(),
+  currency: text("currency").notNull(), expiresOn: text("expires_on"), notes: text("notes").notNull().default(""), lineItems: text("line_items").notNull().default("[]"),
+  subtotalMinor: integer("subtotal_minor").notNull().default(0), status: text("status", { enum: ["draft", "published", "revoked"] }).notNull().default("draft"),
+  publishedVersionId: text("published_version_id"), revision: integer("revision").notNull().default(1), changeId: text("change_id").notNull(),
+  createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("estimates_workspace_number_unique").on(table.workspaceId, table.estimateNumber), index("estimates_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt, table.id), index("estimates_contact_idx").on(table.workspaceId, table.contactId, table.updatedAt, table.id)]);
+
+export const estimateVersions = sqliteTable("estimate_versions", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }), estimateId: text("estimate_id").notNull().references(() => estimates.id, { onDelete: "restrict" }),
+  version: integer("version").notNull(), estimateNumber: text("estimate_number").notNull(), title: text("title").notNull(), sellerName: text("seller_name").notNull(), sellerEmail: text("seller_email").notNull(), recipientName: text("recipient_name").notNull(), recipientEmail: text("recipient_email").notNull(),
+  currency: text("currency").notNull(), expiresOn: text("expires_on"), notes: text("notes").notNull(), lineItems: text("line_items").notNull(), subtotalMinor: integer("subtotal_minor").notNull(), accessTokenHash: text("access_token_hash").notNull(), publishedBy: text("published_by").notNull(), publishedAt: text("published_at").notNull(),
+}, (table) => [uniqueIndex("estimate_versions_estimate_version_unique").on(table.workspaceId, table.estimateId, table.version), uniqueIndex("estimate_versions_access_hash_unique").on(table.accessTokenHash)]);
+
+export const estimateResponses = sqliteTable("estimate_responses", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }), estimateId: text("estimate_id").notNull().references(() => estimates.id, { onDelete: "restrict" }), versionId: text("version_id").notNull().references(() => estimateVersions.id, { onDelete: "restrict" }),
+  idempotencyKey: text("idempotency_key").notNull(), decision: text("decision", { enum: ["acknowledged", "declined"] }).notNull(), typedName: text("typed_name").notNull(), note: text("note"), privacyText: text("privacy_text").notNull(), ipHash: text("ip_hash"), userAgent: text("user_agent"), submittedAt: text("submitted_at").notNull(),
+}, (table) => [uniqueIndex("estimate_responses_version_unique").on(table.workspaceId, table.versionId), uniqueIndex("estimate_responses_idempotency_unique").on(table.workspaceId, table.idempotencyKey)]);
+
 export const paymentLedgerEntries = sqliteTable("payment_ledger_entries", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   contactId: text("contact_id").references(() => contacts.id, { onDelete: "restrict" }),
