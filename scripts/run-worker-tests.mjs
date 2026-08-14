@@ -4,9 +4,10 @@ const stressPattern = "\\[stress\\]";
 const extendedPattern = "\\[extended\\]";
 const marketingPattern = "\\[marketing\\]";
 const reviewsPattern = "\\[reviews\\]";
+const estimatesPattern = "\\[estimates\\]";
 const authDomainPattern = "\\[auth-domain\\]";
 const authContractPattern = "\\[auth-contract\\]";
-const isolatedPattern = `(${stressPattern}|${extendedPattern}|${marketingPattern}|${reviewsPattern}|${authDomainPattern}|${authContractPattern})`;
+const isolatedPattern = `(${stressPattern}|${extendedPattern}|${marketingPattern}|${reviewsPattern}|${estimatesPattern}|${authDomainPattern}|${authContractPattern})`;
 const domainPattern = "(automation|workflow|contact|opportunity|pipeline|task|recovery|webhook)";
 const platformBoundaryPatterns = [
   "authorization and transport security",
@@ -18,7 +19,8 @@ const shards = [
   ["extended", extendedPattern],
   ["marketing", marketingPattern],
   ["reviews", reviewsPattern],
-  ["auth-domain", `^(?!.*${marketingPattern}).*${authDomainPattern}.*$`],
+  ["estimates", estimatesPattern],
+  ["auth-domain", `^(?!.*${marketingPattern})(?!.*${reviewsPattern})(?!.*${estimatesPattern}).*${authDomainPattern}.*$`],
   ["auth-contract", authContractPattern],
   ["core-domain", `^(?!.*${isolatedPattern}).*${domainPattern}.*$`],
   ...platformBoundaryPatterns.map((pattern) => [

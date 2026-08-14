@@ -28,6 +28,7 @@ import SurveysWorkspace from "./SurveysWorkspace";
 import SitesWorkspace from "./SitesWorkspace";
 import MarketingWorkspace from "./MarketingWorkspace";
 import ReviewRequestsWorkspace from "./ReviewRequestsWorkspace";
+import EstimatesWorkspace from "./EstimatesWorkspace";
 
 const VisualAutomationBuilder = lazy(() => import("./VisualAutomationBuilder"));
 
@@ -726,7 +727,7 @@ type CommandEntry =
   | { id: string; kind: "contact"; label: string; description: string; record: Contact }
   | { id: string; kind: "company"; label: string; description: string; record: Company }
   | { id: string; kind: "opportunity"; label: string; description: string; record: Opportunity };
-type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "surveys" | "sites" | "marketing" | "reviews" | "booking" | "payments" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
+type WorkspaceView = "dashboard" | "leads" | "pipeline" | "conversations" | "forms" | "surveys" | "sites" | "marketing" | "reviews" | "booking" | "estimates" | "payments" | "tasks" | "reports" | "agent" | "automations" | "integrations" | "settings";
 type IntegrationDomain = "mailboxes" | "agents" | "sources" | "webhooks";
 type IntegrationCatalogView = "catalog" | "installed";
 type LeadView = "inbox" | "contacts" | "companies" | "visitors";
@@ -744,6 +745,7 @@ const workspaceViews: Array<{ id: WorkspaceView; label: string; icon: string; gr
   { id: "marketing", label: "Marketing", icon: "E", group: "Workspace" },
   { id: "reviews", label: "Review requests", icon: "★", group: "Workspace" },
   { id: "booking", label: "Booking", icon: "B", group: "Workspace" },
+  { id: "estimates", label: "Estimates", icon: "#", group: "Workspace", adminOnly: true },
   { id: "payments", label: "Payments", icon: "$", group: "Workspace", adminOnly: true },
   { id: "tasks", label: "Calendar & tasks", icon: "T", group: "Workspace" },
   { id: "reports", label: "Reports", icon: "R", group: "Intelligence" },
@@ -4842,6 +4844,7 @@ export default function CrmDashboard() {
       <MarketingWorkspace active={activeView === "marketing"} canAdmin={Boolean(canAdmin)}/>
       <ReviewRequestsWorkspace active={activeView === "reviews"} canAdmin={Boolean(canAdmin)}/>
       <BookingWorkspace active={activeView === "booking"} canAdmin={Boolean(canAdmin)}/>
+      <EstimatesWorkspace active={activeView === "estimates" && Boolean(canAdmin)} canAdmin={Boolean(canAdmin)}/>
       <ReportingWorkspace active={activeView === "reports"}/>
       <PaymentsWorkspace active={activeView === "payments" && Boolean(canAdmin)}/>
       <section className="metrics" hidden={activeView !== "dashboard"}>

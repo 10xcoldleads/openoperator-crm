@@ -22,3 +22,9 @@ npm test
 ```
 
 New dependencies require a clear functional reason, an identifiable upstream, a compatible license, a maintained release history, and a clean vulnerability review.
+
+Capability-level upstream and sidecar decisions are maintained in
+[`OPEN_SOURCE_CAPABILITY_STRATEGY.md`](./OPEN_SOURCE_CAPABILITY_STRATEGY.md).
+Listing a project there is research evidence, not approval to install, clone,
+copy, deploy, or connect it. Each adoption still requires the repository
+admission gate at the exact selected commit or release.

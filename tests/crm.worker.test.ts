@@ -98,6 +98,9 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM review_feedback"),
     env.DB.prepare("DELETE FROM review_requests"),
     env.DB.prepare("DELETE FROM review_destinations"),
+    env.DB.prepare("DELETE FROM estimate_responses"),
+    env.DB.prepare("DELETE FROM estimate_versions"),
+    env.DB.prepare("DELETE FROM estimates"),
     env.DB.prepare("DELETE FROM marketing_campaign_recipients"),
     env.DB.prepare("DELETE FROM marketing_campaign_versions"),
     env.DB.prepare("DELETE FROM marketing_campaigns"),
@@ -982,6 +985,51 @@ describe("authorization and transport security", () => {
     expect((await env.DB.prepare("SELECT status,revision FROM review_destinations WHERE id=?").bind(destination.id).first())).toEqual({ status: "revoked", revision: 2 });
     expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='review_destination.revoked' AND entity_id=?").bind(destination.id).first<{ total: number }>())?.total).toBe(1);
     outbound.mockRestore();
+  });
+
+  it("[estimates] freezes deterministic totals, reveals access once, records one non-signature response, and revokes immediately", async () => {
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO workspace_members(id,workspace_id,email,role,active,created_at) VALUES('mem_estimate_member','ws_openoperator','estimate-member@example.com','member',1,?)`).bind(now).run();
+    const memberHeaders = { "oai-authenticated-user-email": "estimate-member@example.com", ...jsonHeaders };
+    const deniedEstimate = await call("/v1/admin/estimates", { method: "POST", headers: memberHeaders, body: "{}" });
+    expect({ status: deniedEstimate.status, body: await deniedEstimate.json() }).toEqual({ status: 403, body: { error: "Admin role required" } });
+    expect((await call("/v1/admin/estimates", { headers: memberHeaders })).status).toBe(403);
+    const contactId = `con_${"6".repeat(32)}`;
+    await env.DB.prepare(`INSERT INTO contacts(id,workspace_id,email,first_name,last_name,status,stage,score,tags,custom_fields,created_at,updated_at)
+      VALUES(?,?,?,'Taylor','Customer','lead','new',0,'[]','{}',?,?)`).bind(contactId, "ws_openoperator", "taylor@example.com", now, now).run();
+    const createdResponse = await call("/v1/admin/estimates", { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ contact_id: contactId, title: "Implementation estimate", seller_name: "Operator Labs", seller_email: "seller@example.com", currency: "usd" }) });
+    expect(createdResponse.status).toBe(201); const created = (await createdResponse.json() as { estimate: { id: string; estimate_number: string; revision: number; status: string } }).estimate;
+    expect(created).toMatchObject({ status: "draft", revision: 1 }); expect(created.estimate_number).toMatch(/^EST-[A-F0-9]{10}$/);
+    expect((await call(`/v1/admin/estimates/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: created.revision, line_items: [{ id: "bad", description: "Bad", quantity: 0, unit_amount_minor: 1 }] }) })).status).toBe(400);
+    expect((await call(`/v1/admin/estimates/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: created.revision, expires_on: "2099-02-31" }) })).status).toBe(400);
+    const items = [{ id: "strategy", description: "Strategy and architecture", quantity: 2, unit_amount_minor: 12550 }, { id: "delivery", description: "Implementation", quantity: 1, unit_amount_minor: 74900 }];
+    const updatedResponse = await call(`/v1/admin/estimates/${created.id}`, { method: "PATCH", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: created.revision, expires_on: "2099-12-31", notes: "No tax or payment is included.", line_items: items }) });
+    expect(updatedResponse.status).toBe(200); const updated = (await updatedResponse.json() as { estimate: { revision: number; subtotal_minor: number } }).estimate; expect(updated.subtotal_minor).toBe(100000);
+    const publishRace = await Promise.all([1, 2].map(() => call(`/v1/admin/estimates/${created.id}/publish`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: updated.revision, confirmation: "PUBLISH ESTIMATE" }) })));
+    expect(publishRace.map((response) => response.status).sort()).toEqual([200, 409]); const winner = publishRace.find((response) => response.status === 200)!;
+    const published = await winner.json() as { estimate: { revision: number; status: string }; access: { public_path: string; shown_once: boolean; automatic_delivery: boolean } };
+    expect(published.estimate.status).toBe("published"); expect(published.access).toMatchObject({ shown_once: true, automatic_delivery: false });
+    const token = published.access.public_path.match(/^\/estimate#(estlink_estv_[a-f0-9]{32}_[a-f0-9]{64})$/)?.[1]; expect(token).toBeTruthy();
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM estimate_versions WHERE estimate_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    expect(JSON.stringify(await call("/v1/admin/estimates", { headers: adminHeaders }).then(response => response.json()))).not.toMatch(/estlink_|access_token_hash/);
+    const sessionResponse = await call("/v1/public/estimates/session", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ token }) }); expect(sessionResponse.status).toBe(200);
+    const session = await sessionResponse.json() as { estimate: { subtotal_minor: number; line_items: unknown[]; recipient_email: string }; response: null; disclosure: string };
+    expect(session.estimate).toMatchObject({ subtotal_minor: 100000, recipient_email: "taylor@example.com" }); expect(session.estimate.line_items).toEqual(items); expect(session.disclosure).toMatch(/not an electronic signature/i);
+    const responseBody = { token, decision: "acknowledged", typed_name: "Taylor Customer", note: "Received for review.", privacy_accepted: true, idempotency_key: "estimate-response-test-1", website: "" };
+    expect((await call("/v1/public/estimates/respond", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...responseBody, privacy_accepted: false }) })).status).toBe(400);
+    expect((await call("/v1/public/estimates/respond", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...responseBody, website: "bot.example" }) })).status).toBe(202);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM estimate_responses").first<{ total: number }>())?.total).toBe(0);
+    expect((await call("/v1/public/estimates/respond", { method: "POST", headers: jsonHeaders, body: JSON.stringify(responseBody) })).status).toBe(201);
+    expect((await call("/v1/public/estimates/respond", { method: "POST", headers: jsonHeaders, body: JSON.stringify(responseBody) })).status).toBe(200);
+    expect((await call("/v1/public/estimates/respond", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...responseBody, decision: "declined" }) })).status).toBe(409);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM estimate_responses WHERE estimate_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
+    await expect(env.DB.prepare("UPDATE estimate_versions SET subtotal_minor=1 WHERE estimate_id=?").bind(created.id).run()).rejects.toThrow(/immutable/);
+    await expect(env.DB.prepare("UPDATE estimate_responses SET decision='declined' WHERE estimate_id=?").bind(created.id).run()).rejects.toThrow(/immutable/);
+    const backup = await call("/v1/admin/recovery/backup", { headers: adminHeaders }); const backupText = await backup.text(); expect(backup.status).toBe(200);
+    expect((await call("/v1/admin/recovery/restore/validate", { method: "POST", headers: { ...adminHeaders, "content-type": "application/vnd.openoperator.backup+json" }, body: backupText })).status).toBe(200);
+    const revoke = () => call(`/v1/admin/estimates/${created.id}/revoke`, { method: "POST", headers: { ...adminHeaders, ...jsonHeaders }, body: JSON.stringify({ if_revision: published.estimate.revision, confirmation: "REVOKE ESTIMATE" }) });
+    expect((await revoke()).status).toBe(200); expect((await revoke()).status).toBe(409); expect((await call("/v1/public/estimates/session", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ token }) })).status).toBe(404);
+    expect((await env.DB.prepare("SELECT COUNT(*) total FROM audit_log WHERE action='estimate.revoked' AND entity_id=?").bind(created.id).first<{ total: number }>())?.total).toBe(1);
   });
 
   it("[marketing] freezes consented recipients, suppresses opt-outs, retries failures idempotently, and supports one-click unsubscribe", async () => {
